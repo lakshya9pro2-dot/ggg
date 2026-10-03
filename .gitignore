@@ -9,3 +9,4 @@ captures/
 .externalNativeBuild
 .cxx
 local.properties
+__pycache__/
