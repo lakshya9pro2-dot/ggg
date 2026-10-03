@@ -100,7 +100,9 @@ class LiteHttpServerTest {
             override fun getHeaders(): Map<String, String> = emptyMap()
             override fun getInputStream(): InputStream? = null
             override fun getMethod(): NanoHTTPD.Method = NanoHTTPD.Method.GET
+            @Suppress("DEPRECATION")
             override fun getParms(): Map<String, String> = parms
+            override fun getParameters(): Map<String, List<String>> = parms.mapValues { listOf(it.value) }
             override fun getQueryParameterString(): String? = queryString
             override fun getUri(): String = uri
             override fun parseBody(files: Map<String, String>?) {}

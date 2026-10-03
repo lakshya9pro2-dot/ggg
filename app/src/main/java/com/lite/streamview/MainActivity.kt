@@ -296,7 +296,7 @@ class MainActivity : AppCompatActivity() {
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
         if (customView != null) {
-            (webView.webChromeClient as? WebChromeClient)?.onHideCustomView()
+            webView.webChromeClient?.onHideCustomView()
         } else if (webView.canGoBack()) {
             webView.goBack()
         } else {

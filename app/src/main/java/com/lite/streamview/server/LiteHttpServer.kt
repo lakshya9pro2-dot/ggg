@@ -37,6 +37,7 @@ class LiteHttpServer(
         }
 
         val uri = session.uri ?: "/"
+        @Suppress("DEPRECATION")
         val params = session.parms
 
         try {
@@ -181,6 +182,7 @@ class LiteHttpServer(
     }
 
     fun extractTargetUrl(session: IHTTPSession): String? {
+        @Suppress("DEPRECATION")
         val params = session.parms
         val uri = session.uri ?: ""
 
