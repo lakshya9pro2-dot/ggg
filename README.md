@@ -13,6 +13,8 @@ An ultra-lightweight Android app engineered for older and low-end devices. Built
 5. **Ultra Lite Mode**: Blocks images (returns 1x1 transparent pixels to maintain layout without downloading images), disables non-essential WebView features, and optimizes memory usage.
 6. **Zero Idle Overhead**: Event-driven architecture with zero background polling loops and proper lifecycle management (`onPause` / `onDestroy`).
 7. **CI/CD Built with GitHub Actions**: Automatically tests and compiles both Debug and Release APKs on push.
+8. **Android 7 OS Optimized with Live Logs Console**: Includes an on-screen live terminal log view replacing WebView rendering to conserve memory on older Android 7+ devices, with instant toggle between Logs and WebView.
+9. **Stream Header Extraction**: Automatically captures and returns required `Origin` and `Referer` headers alongside `.m3u8` URLs in API responses.
 
 ---
 
@@ -44,7 +46,11 @@ GET /extract?url=https://example.com/video&timeout=5
   "success": true,
   "type": "hls",
   "url": "https://example.com/video/master.m3u8",
-  "contentType": "application/vnd.apple.mpegurl"
+  "contentType": "application/vnd.apple.mpegurl",
+  "headers": {
+    "Origin": "https://example.com",
+    "Referer": "https://example.com/video"
+  }
 }
 ```
 **Response (Not found):**
@@ -52,6 +58,7 @@ GET /extract?url=https://example.com/video&timeout=5
 {
   "success": false,
   "url": null,
+  "headers": null,
   "error": "HLS stream not detected"
 }
 ```
@@ -65,12 +72,16 @@ GET /status
 {
   "success": true,
   "status": "running",
-  "host": "127.0.0.1",
+  "host": "0.0.0.0",
   "port": 8080,
   "liteMode": true,
   "currentUrl": "https://example.com/video",
   "hlsDetected": true,
-  "hlsUrl": "https://example.com/video/master.m3u8"
+  "hlsUrl": "https://example.com/video/master.m3u8",
+  "headers": {
+    "Origin": "https://example.com",
+    "Referer": "https://example.com/video"
+  }
 }
 ```
 

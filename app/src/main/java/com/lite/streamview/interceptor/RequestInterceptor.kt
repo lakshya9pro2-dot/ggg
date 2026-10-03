@@ -4,12 +4,15 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import com.lite.streamview.store.HlsStream
 import com.lite.streamview.store.HlsUrlStore
+import com.lite.streamview.util.AppLogger
 import java.io.ByteArrayInputStream
+import java.net.URI
 
 class RequestInterceptor(
     private val hlsUrlStore: HlsUrlStore,
     @Volatile var isLiteModeEnabled: Boolean = true
 ) {
+    @Volatile var currentNavigationUrl: String? = null
 
     companion object {
         // 1x1 transparent PNG byte array (68 bytes) to return for blocked images
@@ -134,6 +137,48 @@ class RequestInterceptor(
     }
 
     /**
+     * Extracts Origin and Referer headers from WebResourceRequest headers,
+     * falling back to the current navigation URL if headers are omitted by WebView.
+     */
+    fun extractOriginAndReferer(
+        headers: Map<String, String>?,
+        fallbackUrl: String? = currentNavigationUrl
+    ): Pair<String, String> {
+        var origin = ""
+        var referer = ""
+
+        if (headers != null) {
+            for ((key, value) in headers) {
+                if (key.equals("Origin", ignoreCase = true)) {
+                    origin = value.trim()
+                } else if (key.equals("Referer", ignoreCase = true)) {
+                    referer = value.trim()
+                }
+            }
+        }
+
+        // Fallback to active navigation URL for Referer
+        if (referer.isBlank() && !fallbackUrl.isNullOrBlank()) {
+            referer = fallbackUrl.trim()
+        }
+
+        // Fallback to origin derived from Referer
+        if (origin.isBlank() && referer.isNotBlank()) {
+            try {
+                val uri = URI(referer)
+                if (uri.scheme != null && uri.host != null) {
+                    origin = "${uri.scheme}://${uri.host}"
+                    if (uri.port != -1 && uri.port != 80 && uri.port != 443) {
+                        origin += ":${uri.port}"
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        return Pair(origin, referer)
+    }
+
+    /**
      * Inspects a WebResourceRequest.
      * Returns null if allowed, or a custom WebResourceResponse if blocked/filtered.
      */
@@ -143,12 +188,15 @@ class RequestInterceptor(
         // 1. Detect HLS (First HLS only)
         if (isHlsResource(urlStr, request.requestHeaders)) {
             if (!hlsUrlStore.hasHls()) {
-                hlsUrlStore.setLatestHls(
-                    HlsStream(
-                        url = urlStr,
-                        contentType = "application/vnd.apple.mpegurl"
-                    )
+                val (origin, referer) = extractOriginAndReferer(request.requestHeaders)
+                val stream = HlsStream(
+                    url = urlStr,
+                    contentType = "application/vnd.apple.mpegurl",
+                    origin = origin.ifBlank { null },
+                    referer = referer.ifBlank { null }
                 )
+                hlsUrlStore.setLatestHls(stream)
+                AppLogger.log("HLS", "Stream found: $urlStr (Origin: $origin, Referer: $referer)")
             }
             // Allow stream to proceed to the HTML5 video player
             return null
@@ -156,6 +204,7 @@ class RequestInterceptor(
 
         // 2. Block Ads and Trackers
         if (isAdOrTracker(urlStr)) {
+            AppLogger.log("AD_BLOCK", "Blocked: $urlStr")
             return WebResourceResponse(
                 "text/plain",
                 "UTF-8",

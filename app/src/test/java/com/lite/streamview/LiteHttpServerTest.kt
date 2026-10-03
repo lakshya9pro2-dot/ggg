@@ -89,6 +89,25 @@ class LiteHttpServerTest {
         assertEquals("https://example.com/video", extracted)
     }
 
+    @Test
+    fun testCreateHeadersJson() {
+        val streamWithHeaders = com.lite.streamview.store.HlsStream(
+            url = "https://example.com/stream.m3u8",
+            origin = "https://vidfast.vc",
+            referer = "https://vidfast.vc/movie/550"
+        )
+        val json = server.createHeadersJson(streamWithHeaders)
+        assertNotNull(json)
+        assertEquals("https://vidfast.vc", json?.getString("Origin"))
+        assertEquals("https://vidfast.vc/movie/550", json?.getString("Referer"))
+
+        val streamWithoutHeaders = com.lite.streamview.store.HlsStream(
+            url = "https://example.com/stream.m3u8"
+        )
+        assertNull(server.createHeadersJson(streamWithoutHeaders))
+        assertNull(server.createHeadersJson(null))
+    }
+
     private fun createMockSession(
         uri: String,
         parms: Map<String, String>,

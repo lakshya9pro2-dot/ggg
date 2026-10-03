@@ -42,6 +42,20 @@ class HlsUrlStoreTest {
     }
 
     @Test
+    fun testHlsStreamWithOriginAndReferer() {
+        val stream = HlsStream(
+            url = "https://example.com/playlist.m3u8",
+            origin = "https://vidfast.vc",
+            referer = "https://vidfast.vc/movie/1265609"
+        )
+        store.setLatestHls(stream)
+        val retrieved = store.getLatestHls()
+        assertNotNull(retrieved)
+        assertEquals("https://vidfast.vc", retrieved?.origin)
+        assertEquals("https://vidfast.vc/movie/1265609", retrieved?.referer)
+    }
+
+    @Test
     fun testCaptureFirstHlsOnly() {
         val masterStream = HlsStream("https://example.com/master.m3u8")
         val subStream1 = HlsStream("https://example.com/1080p.m3u8")

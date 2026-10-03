@@ -81,7 +81,10 @@ class StreamExtractUser(HttpUser):
                         stats_collector["extractions_successful"] += 1
                         stats_collector["discovered_streams"].add(hls_url)
                         response.success()
-                        logger.info(f"[200 OK] TMDB {movie_id} -> HLS Extracted: {hls_url[:70]}...")
+                        headers_info = data.get("headers") or {}
+                        origin = headers_info.get("Origin", "None")
+                        referer = headers_info.get("Referer", "None")
+                        logger.info(f"[200 OK] TMDB {movie_id} -> HLS: {hls_url[:60]}... | Headers: Origin={origin}, Referer={referer}")
                     else:
                         # Server replied properly (HLS not yet detected within timeout)
                         error_msg = data.get("error", "No stream detected")

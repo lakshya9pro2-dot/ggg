@@ -11,4 +11,10 @@
     <string name="lite_mode">Lite Mode</string>
     <string name="copy_address">Copy URL</string>
     <string name="copied_to_clipboard">Copied to clipboard</string>
+    <string name="show_webview">[ Show WebView ]</string>
+    <string name="show_logs">[ Show Logs ]</string>
+    <string name="mode_ip">IP</string>
+    <string name="mode_local">Local</string>
+    <string name="clear_logs">Clear</string>
+    <string name="copy_logs">Copy</string>
 </resources>

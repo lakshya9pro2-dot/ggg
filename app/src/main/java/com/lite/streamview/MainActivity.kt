@@ -19,6 +19,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -27,6 +28,7 @@ import com.lite.streamview.interceptor.RequestInterceptor
 import com.lite.streamview.server.LiteHttpServer
 import com.lite.streamview.store.HlsStream
 import com.lite.streamview.store.HlsUrlStore
+import com.lite.streamview.util.AppLogger
 import fi.iki.elonen.NanoHTTPD
 
 class MainActivity : AppCompatActivity() {
@@ -37,11 +39,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvHlsStatus: TextView
     private lateinit var btnCopyHls: Button
     private lateinit var tvServerStatus: TextView
+    private lateinit var btnToggleHost: Button
     private lateinit var btnCopyServer: Button
     private lateinit var switchLiteMode: SwitchMaterial
     private lateinit var progressBar: ProgressBar
     private lateinit var panelBody: View
     private lateinit var btnTogglePanel: TextView
+    private lateinit var btnToggleView: TextView
+    private lateinit var logContainer: View
+    private lateinit var scrollLogs: ScrollView
+    private lateinit var tvLogs: TextView
+    private lateinit var btnClearLogs: TextView
+    private lateinit var btnCopyLogs: TextView
     private lateinit var fullscreenContainer: FrameLayout
 
     private val hlsUrlStore = HlsUrlStore()
@@ -50,12 +59,17 @@ class MainActivity : AppCompatActivity() {
 
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+    private lateinit var chromeClient: WebChromeClient
+
+    // Toggle between LAN IP address and Localhost (127.0.0.1)
+    private var useIpHost: Boolean = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         initViews()
+        initLogger()
         initInterceptor()
         initWebView()
         initServer()
@@ -69,12 +83,36 @@ class MainActivity : AppCompatActivity() {
         tvHlsStatus = findViewById(R.id.tvHlsStatus)
         btnCopyHls = findViewById(R.id.btnCopyHls)
         tvServerStatus = findViewById(R.id.tvServerStatus)
+        btnToggleHost = findViewById(R.id.btnToggleHost)
         btnCopyServer = findViewById(R.id.btnCopyServer)
         switchLiteMode = findViewById(R.id.switchLiteMode)
         progressBar = findViewById(R.id.progressBar)
         panelBody = findViewById(R.id.panelBody)
         btnTogglePanel = findViewById(R.id.btnTogglePanel)
+        btnToggleView = findViewById(R.id.btnToggleView)
+        logContainer = findViewById(R.id.logContainer)
+        scrollLogs = findViewById(R.id.scrollLogs)
+        tvLogs = findViewById(R.id.tvLogs)
+        btnClearLogs = findViewById(R.id.btnClearLogs)
+        btnCopyLogs = findViewById(R.id.btnCopyLogs)
         fullscreenContainer = findViewById(R.id.fullscreenContainer)
+    }
+
+    private fun initLogger() {
+        tvLogs.text = AppLogger.getHistory()
+        AppLogger.setListener { line ->
+            runOnUiThread {
+                if (line == "__CLEAR__") {
+                    tvLogs.text = ""
+                } else {
+                    tvLogs.append(line + "\n")
+                    scrollLogs.post {
+                        scrollLogs.fullScroll(View.FOCUS_DOWN)
+                    }
+                }
+            }
+        }
+        AppLogger.log("SYSTEM", "LiteWebView started on Android (API ${android.os.Build.VERSION.SDK_INT})")
     }
 
     private fun initInterceptor() {
@@ -128,7 +166,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        webView.webChromeClient = object : WebChromeClient() {
+        chromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 progressBar.progress = newProgress
                 if (newProgress >= 100) {
@@ -152,6 +190,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 fullscreenContainer.visibility = View.VISIBLE
                 webView.visibility = View.GONE
+                logContainer.visibility = View.GONE
             }
 
             override fun onHideCustomView() {
@@ -159,11 +198,20 @@ class MainActivity : AppCompatActivity() {
                 fullscreenContainer.removeView(customView)
                 customView = null
                 fullscreenContainer.visibility = View.GONE
-                webView.visibility = View.VISIBLE
+                // Restore previous active view
+                if (btnToggleView.text.toString().contains("WebView")) {
+                    logContainer.visibility = View.VISIBLE
+                    webView.visibility = View.GONE
+                } else {
+                    webView.visibility = View.VISIBLE
+                    logContainer.visibility = View.GONE
+                }
                 customViewCallback?.onCustomViewHidden()
                 customViewCallback = null
             }
         }
+
+        webView.webChromeClient = chromeClient
     }
 
     private fun initServer() {
@@ -190,14 +238,31 @@ class MainActivity : AppCompatActivity() {
             // Start NanoHTTPD with non-daemon thread for stable 24/7 background operation
             server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             httpServer = server
-            val ip = getLocalIpAddress()
-            val hostText = if (ip != null) ":8080 ($ip)" else ":8080"
-            tvServerStatus.text = "● Running $hostText"
-            tvServerStatus.setTextColor(Color.parseColor("#2E7D32"))
+            updateServerDisplay()
+            AppLogger.log("SERVER", "NanoHTTPD listening on :8080 (0.0.0.0)")
         } catch (e: Exception) {
             tvServerStatus.text = "● Error: ${e.message ?: "Failed to start"}"
             tvServerStatus.setTextColor(Color.parseColor("#C62828"))
+            AppLogger.log("SERVER", "Start error: ${e.message}")
         }
+    }
+
+    private fun getActiveHostUrl(): String {
+        val ip = getLocalIpAddress()
+        return if (useIpHost && ip != null) {
+            "http://$ip:8080"
+        } else {
+            "http://127.0.0.1:8080"
+        }
+    }
+
+    private fun updateServerDisplay() {
+        val activeUrl = getActiveHostUrl()
+        val ip = getLocalIpAddress()
+        val isIpActive = useIpHost && ip != null
+        btnToggleHost.text = if (isIpActive) "Local" else "IP"
+        tvServerStatus.text = "● $activeUrl"
+        tvServerStatus.setTextColor(Color.parseColor("#2E7D32"))
     }
 
     private fun setupListeners() {
@@ -223,16 +288,49 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        switchLiteMode.setOnCheckedChangeListener { _, isChecked ->
-            applyLiteMode(isChecked)
-            httpServer?.isLiteMode = isChecked
+        // Toggle between Live Server Logs and WebView
+        btnToggleView.setOnClickListener {
+            if (webView.visibility == View.VISIBLE) {
+                webView.visibility = View.GONE
+                logContainer.visibility = View.VISIBLE
+                btnToggleView.text = "[ Show WebView ]"
+                AppLogger.log("UI", "View mode: Live Logs Console")
+            } else {
+                logContainer.visibility = View.GONE
+                webView.visibility = View.VISIBLE
+                btnToggleView.text = "[ Show Logs ]"
+                AppLogger.log("UI", "View mode: WebView")
+            }
+        }
+
+        // Toggle Server Address between Device LAN IP and Localhost (127.0.0.1)
+        btnToggleHost.setOnClickListener {
+            useIpHost = !useIpHost
+            updateServerDisplay()
+            val modeName = if (useIpHost && getLocalIpAddress() != null) "Device IP" else "Localhost"
+            Toast.makeText(this, "Switched to $modeName", Toast.LENGTH_SHORT).show()
+            AppLogger.log("UI", "Server host display toggled to: ${getActiveHostUrl()}")
         }
 
         btnCopyServer.setOnClickListener {
-            val ip = getLocalIpAddress() ?: "127.0.0.1"
-            val serverUrl = "http://$ip:8080"
+            val serverUrl = getActiveHostUrl()
             copyToClipboard("Server URL", serverUrl)
             Toast.makeText(this, "Copied $serverUrl", Toast.LENGTH_SHORT).show()
+        }
+
+        btnClearLogs.setOnClickListener {
+            AppLogger.clear()
+            Toast.makeText(this, "Logs cleared", Toast.LENGTH_SHORT).show()
+        }
+
+        btnCopyLogs.setOnClickListener {
+            copyToClipboard("Console Logs", AppLogger.getHistory())
+            Toast.makeText(this, "Copied logs to clipboard", Toast.LENGTH_SHORT).show()
+        }
+
+        switchLiteMode.setOnCheckedChangeListener { _, isChecked ->
+            applyLiteMode(isChecked)
+            httpServer?.isLiteMode = isChecked
         }
 
         btnCopyHls.setOnClickListener {
@@ -255,6 +353,8 @@ class MainActivity : AppCompatActivity() {
         if (resetStore) {
             hlsUrlStore.clear()
         }
+        requestInterceptor.currentNavigationUrl = url
+        AppLogger.log("WEBVIEW", "Loading: $url")
         webView.loadUrl(url)
     }
 
@@ -278,12 +378,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun getLocalIpAddress(): String? {
         try {
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-            while (interfaces.hasMoreElements()) {
-                val iface = interfaces.nextElement()
-                val addresses = iface.inetAddresses
-                while (addresses.hasMoreElements()) {
-                    val addr = addresses.nextElement()
+            val interfaces = java.net.NetworkInterface.getNetworkInterfaces() ?: return null
+            for (iface in interfaces.asSequence()) {
+                if (!iface.isUp || iface.isLoopback) continue
+                for (addr in iface.inetAddresses.asSequence()) {
                     if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
                         return addr.hostAddress
                     }
@@ -296,7 +394,8 @@ class MainActivity : AppCompatActivity() {
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
         if (customView != null) {
-            webView.webChromeClient?.onHideCustomView()
+            // Android 7 safe: calls our stored WebChromeClient reference
+            chromeClient.onHideCustomView()
         } else if (webView.canGoBack()) {
             webView.goBack()
         } else {
@@ -314,6 +413,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         webView.onResume()
         webView.resumeTimers()
+        updateServerDisplay()
         if (httpServer == null || !httpServer!!.isAlive) {
             initServer()
         }

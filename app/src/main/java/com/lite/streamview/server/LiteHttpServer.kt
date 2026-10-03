@@ -1,6 +1,8 @@
 package com.lite.streamview.server
 
+import com.lite.streamview.store.HlsStream
 import com.lite.streamview.store.HlsUrlStore
+import com.lite.streamview.util.AppLogger
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONObject
 import java.net.URI
@@ -45,6 +47,7 @@ class LiteHttpServer(
             if (uri == "/extract" || uri.startsWith("/extract")) {
                 val targetUrl = extractTargetUrl(session)
                 val timeoutSec = params["timeout"]?.toLongOrNull() ?: 5L
+                AppLogger.log("HTTP", "GET /extract url=${targetUrl ?: "active"} timeout=$timeoutSec")
 
                 if (!targetUrl.isNullOrBlank()) {
                     val validated = sanitizeUrl(targetUrl)
@@ -58,7 +61,10 @@ class LiteHttpServer(
                                     put("type", "hls")
                                     put("url", existing.url)
                                     put("contentType", existing.contentType)
+                                    val hObj = createHeadersJson(existing)
+                                    put("headers", hObj ?: JSONObject.NULL)
                                 }
+                                AppLogger.log("HTTP", "Cached HLS returned for: $validated")
                                 return createJsonResponse(Response.Status.OK, json.toString())
                             }
                         }
@@ -74,10 +80,15 @@ class LiteHttpServer(
                             json.put("type", "hls")
                             json.put("url", stream.url)
                             json.put("contentType", stream.contentType)
+                            val hObj = createHeadersJson(stream)
+                            json.put("headers", hObj ?: JSONObject.NULL)
+                            AppLogger.log("HTTP", "HLS Extracted: ${stream.url}")
                         } else {
                             json.put("success", false)
                             json.put("url", JSONObject.NULL)
+                            json.put("headers", JSONObject.NULL)
                             json.put("error", "HLS stream not detected")
+                            AppLogger.log("HTTP", "HLS extraction timed out for: $validated")
                         }
                         return createJsonResponse(Response.Status.OK, json.toString())
                     } else {
@@ -85,6 +96,7 @@ class LiteHttpServer(
                             put("success", false)
                             put("error", "Invalid destination URL. Only http:// and https:// URLs are allowed.")
                         }
+                        AppLogger.log("HTTP", "Invalid URL rejected: $targetUrl")
                         return createJsonResponse(Response.Status.BAD_REQUEST, json.toString())
                     }
                 } else {
@@ -96,9 +108,12 @@ class LiteHttpServer(
                         json.put("type", "hls")
                         json.put("url", stream.url)
                         json.put("contentType", stream.contentType)
+                        val hObj = createHeadersJson(stream)
+                        json.put("headers", hObj ?: JSONObject.NULL)
                     } else {
                         json.put("success", false)
                         json.put("url", JSONObject.NULL)
+                        json.put("headers", JSONObject.NULL)
                         json.put("error", "HLS stream not detected")
                     }
                     return createJsonResponse(Response.Status.OK, json.toString())
@@ -117,6 +132,8 @@ class LiteHttpServer(
                     put("currentUrl", currentUrl ?: JSONObject.NULL)
                     put("hlsDetected", latestHls != null)
                     put("hlsUrl", latestHls?.url ?: JSONObject.NULL)
+                    val hObj = createHeadersJson(latestHls)
+                    put("headers", hObj ?: JSONObject.NULL)
                 }
                 return createJsonResponse(Response.Status.OK, json.toString())
             }
@@ -128,6 +145,7 @@ class LiteHttpServer(
                     val enabled = liteParam.equals("on", true) || liteParam.equals("true", true) || liteParam == "1"
                     isLiteMode = enabled
                     onLiteModeChanged?.invoke(enabled)
+                    AppLogger.log("MODE", "Lite Mode set to $enabled")
                     val json = JSONObject().apply {
                         put("success", true)
                         put("liteMode", enabled)
@@ -144,6 +162,7 @@ class LiteHttpServer(
                     currentUrl = valid
                     hlsUrlStore.prepareForNewStream()
                     onNavigateRequested(valid)
+                    AppLogger.log("HTTP", "Navigating to: $valid")
 
                     val json = JSONObject().apply {
                         put("success", true)
@@ -219,6 +238,18 @@ class LiteHttpServer(
         }
 
         return null
+    }
+
+    fun createHeadersJson(stream: HlsStream?): JSONObject? {
+        if (stream == null) return null
+        val obj = JSONObject()
+        if (!stream.origin.isNullOrBlank()) {
+            obj.put("Origin", stream.origin)
+        }
+        if (!stream.referer.isNullOrBlank()) {
+            obj.put("Referer", stream.referer)
+        }
+        return if (obj.length() > 0) obj else null
     }
 
     fun sanitizeUrl(input: String): String? {

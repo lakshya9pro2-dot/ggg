@@ -82,4 +82,25 @@ class RequestInterceptorTest {
         assertEquals("ads.example.com", interceptor.extractHost(url))
         assertEquals("/tracker/pixel.gif", interceptor.extractPath(url))
     }
+
+    @Test
+    fun testExtractOriginAndRefererFromHeaders() {
+        val headers = mapOf(
+            "Origin" to "https://vidfast.vc",
+            "Referer" to "https://vidfast.vc/movie/1265609"
+        )
+        val (origin, referer) = interceptor.extractOriginAndReferer(headers)
+        assertEquals("https://vidfast.vc", origin)
+        assertEquals("https://vidfast.vc/movie/1265609", referer)
+    }
+
+    @Test
+    fun testExtractOriginAndRefererFallback() {
+        val (origin, referer) = interceptor.extractOriginAndReferer(
+            headers = emptyMap(),
+            fallbackUrl = "https://vidfast.vc/movie/550"
+        )
+        assertEquals("https://vidfast.vc", origin)
+        assertEquals("https://vidfast.vc/movie/550", referer)
+    }
 }

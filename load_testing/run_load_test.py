@@ -131,6 +131,7 @@ def run_standalone_benchmark(host: str, total_requests: int = 15, concurrency: i
                 data = r.json()
                 hls = data.get("url")
                 is_success = data.get("success", False)
+                headers_info = data.get("headers") or {}
                 return {
                     "index": idx,
                     "movie_id": movie_id,
@@ -138,6 +139,7 @@ def run_standalone_benchmark(host: str, total_requests: int = 15, concurrency: i
                     "elapsed": elapsed,
                     "success": is_success,
                     "hls_url": hls,
+                    "headers": headers_info,
                     "error": data.get("error")
                 }
             else:
@@ -148,6 +150,7 @@ def run_standalone_benchmark(host: str, total_requests: int = 15, concurrency: i
                     "elapsed": elapsed,
                     "success": False,
                     "hls_url": None,
+                    "headers": {},
                     "error": f"HTTP {r.status_code}"
                 }
         except Exception as e:
@@ -159,6 +162,7 @@ def run_standalone_benchmark(host: str, total_requests: int = 15, concurrency: i
                 "elapsed": elapsed,
                 "success": False,
                 "hls_url": None,
+                "headers": {},
                 "error": str(e)
             }
 
@@ -175,7 +179,10 @@ def run_standalone_benchmark(host: str, total_requests: int = 15, concurrency: i
             if res["hls_url"]:
                 hls_found_count += 1
                 discovered_hls.append(res["hls_url"])
-                print(f"✅ [{res['index']:02d}/{total_requests:02d}] TMDB {res['movie_id']} in {res['elapsed']:.2f}s -> {res['hls_url'][:60]}...")
+                headers = res.get("headers") or {}
+                orig = headers.get("Origin", "None")
+                ref = headers.get("Referer", "None")
+                print(f"✅ [{res['index']:02d}/{total_requests:02d}] TMDB {res['movie_id']} in {res['elapsed']:.2f}s -> {res['hls_url'][:50]}... | Origin: {orig} | Referer: {ref}")
             else:
                 print(f"ℹ️ [{res['index']:02d}/{total_requests:02d}] TMDB {res['movie_id']} in {res['elapsed']:.2f}s -> {res['error']}")
 

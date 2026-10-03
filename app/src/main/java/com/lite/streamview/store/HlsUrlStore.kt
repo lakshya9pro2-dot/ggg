@@ -7,6 +7,8 @@ import java.util.concurrent.atomic.AtomicReference
 data class HlsStream(
     val url: String,
     val contentType: String = "application/vnd.apple.mpegurl",
+    val origin: String? = null,
+    val referer: String? = null,
     val timestamp: Long = System.currentTimeMillis()
 )
 

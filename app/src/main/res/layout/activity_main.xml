@@ -21,7 +21,7 @@
             android:orientation="vertical"
             android:padding="12dp">
 
-            <!-- Title & Panel Collapse Toggle -->
+            <!-- Title & Panel Controls -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -37,6 +37,16 @@
                     android:textSize="18sp"
                     android:textStyle="bold"
                     android:textColor="@color/text_main" />
+
+                <TextView
+                    android:id="@+id/btnToggleView"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/show_webview"
+                    android:textSize="12sp"
+                    android:textColor="@color/primary"
+                    android:padding="4dp"
+                    android:layout_marginEnd="6dp" />
 
                 <TextView
                     android:id="@+id/btnTogglePanel"
@@ -132,7 +142,7 @@
                             android:visibility="gone" />
                     </LinearLayout>
 
-                    <!-- NanoHTTPD Status Row -->
+                    <!-- NanoHTTPD Status Row with Local/IP Toggle Button -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -143,7 +153,7 @@
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="NanoHTTPD: "
+                            android:text="Server: "
                             android:textStyle="bold"
                             android:textSize="13sp"
                             android:textColor="@color/text_main" />
@@ -155,7 +165,18 @@
                             android:layout_weight="1"
                             android:text="@string/server_running"
                             android:textSize="13sp"
-                            android:textColor="@color/status_green" />
+                            android:textColor="@color/status_green"
+                            android:ellipsize="middle"
+                            android:singleLine="true" />
+
+                        <Button
+                            android:id="@+id/btnToggleHost"
+                            style="?android:attr/borderlessButtonStyle"
+                            android:layout_width="wrap_content"
+                            android:layout_height="32dp"
+                            android:text="IP"
+                            android:textSize="11sp"
+                            android:textColor="@color/primary" />
 
                         <Button
                             android:id="@+id/btnCopyServer"
@@ -205,16 +226,86 @@
         android:visibility="gone"
         android:progressTint="@color/primary" />
 
-    <!-- Container for WebView & Fullscreen HTML5 Video View -->
+    <!-- Container for WebView, Logs & Fullscreen HTML5 Video View -->
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">
 
+        <!-- Hidden by default in favor of logs view -->
         <WebView
             android:id="@+id/webView"
             android:layout_width="match_parent"
-            android:layout_height="match_parent" />
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+
+        <!-- Console Log View (In place of WebView) -->
+        <LinearLayout
+            android:id="@+id/logContainer"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:background="#121212"
+            android:visibility="visible">
+
+            <!-- Log Header / Action Bar -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="4dp"
+                android:background="#1E1E1E">
+
+                <TextView
+                    android:id="@+id/tvLogTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="● Live Server Logs"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:textColor="#A7F3D0" />
+
+                <TextView
+                    android:id="@+id/btnClearLogs"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="[ Clear ]"
+                    android:textSize="11sp"
+                    android:textColor="#90CAF9"
+                    android:padding="4dp" />
+
+                <TextView
+                    android:id="@+id/btnCopyLogs"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="[ Copy ]"
+                    android:textSize="11sp"
+                    android:textColor="#90CAF9"
+                    android:padding="4dp"
+                    android:layout_marginStart="8dp" />
+            </LinearLayout>
+
+            <ScrollView
+                android:id="@+id/scrollLogs"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:fillViewport="true"
+                android:padding="8dp">
+
+                <TextView
+                    android:id="@+id/tvLogs"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:textSize="11sp"
+                    android:textColor="#E0E0E0"
+                    android:textIsSelectable="true"
+                    android:text="[SYSTEM] LiteWebView initialized on Android 7+.\n" />
+            </ScrollView>
+        </LinearLayout>
 
         <FrameLayout
             android:id="@+id/fullscreenContainer"
