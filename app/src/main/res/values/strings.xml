@@ -6,7 +6,7 @@
     <string name="hls_not_detected">● Not detected</string>
     <string name="hls_detected">● HLS Detected</string>
     <string name="server_title">NanoHTTPD</string>
-    <string name="server_running">● Running :8080</string>
+    <string name="server_running">● Running</string>
     <string name="server_stopped">● Stopped</string>
     <string name="lite_mode">Lite Mode</string>
     <string name="copy_address">Copy URL</string>

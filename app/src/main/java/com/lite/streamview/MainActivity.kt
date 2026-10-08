@@ -28,6 +28,9 @@ import com.lite.streamview.interceptor.RequestInterceptor
 import com.lite.streamview.server.LiteHttpServer
 import com.lite.streamview.store.HlsStream
 import com.lite.streamview.store.HlsUrlStore
+import com.lite.streamview.tunnel.PinggyManager
+import com.lite.streamview.tunnel.TunnelInfo
+import com.lite.streamview.tunnel.TunnelState
 import com.lite.streamview.util.AppLogger
 import fi.iki.elonen.NanoHTTPD
 
@@ -53,9 +56,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnCopyLogs: TextView
     private lateinit var fullscreenContainer: FrameLayout
 
+    // Pinggy Tunnel Views
+    private lateinit var tvPinggyStatus: TextView
+    private lateinit var tvPublicUrl: TextView
+    private lateinit var btnCopyPinggyUrl: Button
+    private lateinit var btnRenewPinggy: Button
+    private lateinit var tvPinggyLocalServer: TextView
+    private lateinit var tvPinggyExpires: TextView
+
     private val hlsUrlStore = HlsUrlStore()
     private lateinit var requestInterceptor: RequestInterceptor
     private var httpServer: LiteHttpServer? = null
+    private lateinit var pinggyManager: PinggyManager
 
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
@@ -73,6 +85,7 @@ class MainActivity : AppCompatActivity() {
         initInterceptor()
         initWebView()
         initServer()
+        initPinggy()
         setupListeners()
     }
 
@@ -96,6 +109,13 @@ class MainActivity : AppCompatActivity() {
         btnClearLogs = findViewById(R.id.btnClearLogs)
         btnCopyLogs = findViewById(R.id.btnCopyLogs)
         fullscreenContainer = findViewById(R.id.fullscreenContainer)
+
+        tvPinggyStatus = findViewById(R.id.tvPinggyStatus)
+        tvPublicUrl = findViewById(R.id.tvPublicUrl)
+        btnCopyPinggyUrl = findViewById(R.id.btnCopyPinggyUrl)
+        btnRenewPinggy = findViewById(R.id.btnRenewPinggy)
+        tvPinggyLocalServer = findViewById(R.id.tvPinggyLocalServer)
+        tvPinggyExpires = findViewById(R.id.tvPinggyExpires)
     }
 
     private fun initLogger() {
@@ -220,7 +240,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             val server = LiteHttpServer(
-                port = 8080,
+                port = LiteHttpServer.LOCAL_SERVER_PORT,
                 hlsUrlStore = hlsUrlStore,
                 onNavigateRequested = { url ->
                     runOnUiThread {
@@ -235,11 +255,14 @@ class MainActivity : AppCompatActivity() {
                 }
             )
             server.isLiteMode = switchLiteMode.isChecked
+            if (::pinggyManager.isInitialized) {
+                server.pinggyUrl = pinggyManager.currentUrl
+            }
             // Start NanoHTTPD with non-daemon thread for stable 24/7 background operation
             server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             httpServer = server
             updateServerDisplay()
-            AppLogger.log("SERVER", "NanoHTTPD listening on :8080 (0.0.0.0)")
+            AppLogger.log("SERVER", "NanoHTTPD listening on :${LiteHttpServer.LOCAL_SERVER_PORT} (0.0.0.0)")
         } catch (e: Exception) {
             tvServerStatus.text = "● Error: ${e.message ?: "Failed to start"}"
             tvServerStatus.setTextColor(Color.parseColor("#C62828"))
@@ -247,12 +270,54 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun initPinggy() {
+        pinggyManager = PinggyManager(this)
+        pinggyManager.onTunnelStateChanged = { info ->
+            runOnUiThread {
+                updatePinggyUI(info)
+                httpServer?.pinggyUrl = info.publicUrl
+            }
+        }
+        pinggyManager.start()
+    }
+
+    private fun updatePinggyUI(info: TunnelInfo) {
+        tvPinggyStatus.text = "Status: ${info.state.displayName}"
+        val statusColor = when (info.state) {
+            TunnelState.CONNECTED -> Color.parseColor("#2E7D32")
+            TunnelState.STARTING, TunnelState.CONNECTING -> Color.parseColor("#F57C00")
+            TunnelState.RENEWING -> Color.parseColor("#1976D2")
+            TunnelState.DISCONNECTED, TunnelState.ERROR -> Color.parseColor("#C62828")
+        }
+        tvPinggyStatus.setTextColor(statusColor)
+
+        if (!info.publicUrl.isNullOrBlank()) {
+            tvPublicUrl.text = info.publicUrl
+            tvPublicUrl.setTextColor(Color.parseColor("#1976D2"))
+            btnCopyPinggyUrl.visibility = View.VISIBLE
+        } else {
+            val statusMsg = info.message ?: "Pending..."
+            tvPublicUrl.text = "Public URL: $statusMsg"
+            tvPublicUrl.setTextColor(Color.parseColor("#757575"))
+            btnCopyPinggyUrl.visibility = View.GONE
+        }
+
+        tvPinggyLocalServer.text = "Local server: ${info.localServerUrl}"
+
+        if (info.remainingMinutes != null) {
+            tvPinggyExpires.text = "Expires: ~${info.remainingMinutes} minutes"
+        } else {
+            tvPinggyExpires.text = "Expires: --"
+        }
+    }
+
     private fun getActiveHostUrl(): String {
+        val port = LiteHttpServer.LOCAL_SERVER_PORT
         val ip = getLocalIpAddress()
         return if (useIpHost && ip != null) {
-            "http://$ip:8080"
+            "http://$ip:$port"
         } else {
-            "http://127.0.0.1:8080"
+            "http://127.0.0.1:$port"
         }
     }
 
@@ -340,6 +405,27 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Copied HLS stream URL", Toast.LENGTH_SHORT).show()
             }
         }
+
+        btnCopyPinggyUrl.setOnClickListener {
+            val url = pinggyManager.currentUrl
+            if (!url.isNullOrBlank()) {
+                copyToClipboard("Pinggy Public URL", url)
+                Toast.makeText(this, "Copied Pinggy URL", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        tvPublicUrl.setOnClickListener {
+            val url = pinggyManager.currentUrl
+            if (!url.isNullOrBlank()) {
+                copyToClipboard("Pinggy Public URL", url)
+                Toast.makeText(this, "Copied $url", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        btnRenewPinggy.setOnClickListener {
+            pinggyManager.renew()
+            Toast.makeText(this, "Renewing Pinggy tunnel...", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun applyLiteMode(enabled: Boolean) {
@@ -421,6 +507,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        if (::pinggyManager.isInitialized) {
+            pinggyManager.stop()
+        }
         try {
             httpServer?.stop()
         } catch (_: Exception) {}

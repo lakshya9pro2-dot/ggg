@@ -27,6 +27,17 @@ class LiteHttpServerTest {
     }
 
     @Test
+    fun testDefaultPortIs7777() {
+        val defaultServer = LiteHttpServer(
+            hlsUrlStore = store,
+            onNavigateRequested = {},
+            onLiteModeChanged = {}
+        )
+        assertEquals(7777, defaultServer.port)
+        assertEquals(7777, LiteHttpServer.LOCAL_SERVER_PORT)
+    }
+
+    @Test
     fun testSanitizeUrlValidHttp() {
         val url = "http://example.com/test"
         assertEquals(url, server.sanitizeUrl(url))

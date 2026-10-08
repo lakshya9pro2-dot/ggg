@@ -14,11 +14,22 @@ import java.net.URLDecoder
  * Exposes lightweight REST endpoints to control WebView and extract HLS streams.
  */
 class LiteHttpServer(
-    val port: Int = 8080,
+    val port: Int = LOCAL_SERVER_PORT,
     private val hlsUrlStore: HlsUrlStore,
     private val onNavigateRequested: (String) -> Unit,
     private val onLiteModeChanged: ((Boolean) -> Unit)? = null
 ) : NanoHTTPD(port) {
+
+    companion object {
+        /**
+         * Default port for the local Android HTTP server.
+         * Configured in one central place.
+         */
+        const val LOCAL_SERVER_PORT = 7777
+    }
+
+    @Volatile
+    var pinggyUrl: String? = null
 
     @Volatile
     var currentUrl: String? = null
@@ -132,6 +143,7 @@ class LiteHttpServer(
                     put("currentUrl", currentUrl ?: JSONObject.NULL)
                     put("hlsDetected", latestHls != null)
                     put("hlsUrl", latestHls?.url ?: JSONObject.NULL)
+                    put("pinggyUrl", pinggyUrl ?: JSONObject.NULL)
                     val hObj = createHeadersJson(latestHls)
                     put("headers", hObj ?: JSONObject.NULL)
                 }

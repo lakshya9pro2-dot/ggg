@@ -211,6 +211,109 @@
                             android:layout_height="wrap_content"
                             android:checked="true" />
                     </LinearLayout>
+
+                    <!-- Pinggy Tunnel Section -->
+                    <LinearLayout
+                        android:id="@+id/pinggySection"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:background="#F1F5F9"
+                        android:padding="8dp"
+                        android:layout_marginTop="8dp">
+
+                        <!-- Header: Title + Status -->
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical">
+
+                            <TextView
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="Pinggy Tunnel"
+                                android:textStyle="bold"
+                                android:textSize="13sp"
+                                android:textColor="@color/text_main" />
+
+                            <TextView
+                                android:id="@+id/tvPinggyStatus"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Status: Starting..."
+                                android:textSize="12sp"
+                                android:textStyle="bold"
+                                android:textColor="@color/status_gray" />
+                        </LinearLayout>
+
+                        <!-- Public URL Row -->
+                        <LinearLayout
+                            android:id="@+id/layoutPublicUrl"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical"
+                            android:layout_marginTop="4dp">
+
+                            <TextView
+                                android:id="@+id/tvPublicUrl"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="Public URL: Pending..."
+                                android:textSize="12sp"
+                                android:textColor="@color/primary"
+                                android:textIsSelectable="true"
+                                android:ellipsize="middle"
+                                android:singleLine="true" />
+
+                            <Button
+                                android:id="@+id/btnCopyPinggyUrl"
+                                style="?android:attr/borderlessButtonStyle"
+                                android:layout_width="wrap_content"
+                                android:layout_height="30dp"
+                                android:text="Copy"
+                                android:textSize="11sp"
+                                android:textColor="@color/primary"
+                                android:visibility="gone" />
+
+                            <Button
+                                android:id="@+id/btnRenewPinggy"
+                                style="?android:attr/borderlessButtonStyle"
+                                android:layout_width="wrap_content"
+                                android:layout_height="30dp"
+                                android:text="Renew"
+                                android:textSize="11sp"
+                                android:textColor="@color/primary" />
+                        </LinearLayout>
+
+                        <!-- Local Server + Expiry Row -->
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:layout_marginTop="2dp">
+
+                            <TextView
+                                android:id="@+id/tvPinggyLocalServer"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="Local server: http://127.0.0.1:7777"
+                                android:textSize="11sp"
+                                android:textColor="@color/status_gray" />
+
+                            <TextView
+                                android:id="@+id/tvPinggyExpires"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Expires: --"
+                                android:textSize="11sp"
+                                android:textColor="@color/status_gray" />
+                        </LinearLayout>
+                    </LinearLayout>
                 </LinearLayout>
 
             </LinearLayout>
