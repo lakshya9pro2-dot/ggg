@@ -45,8 +45,13 @@ data class TunnelInfo(
 
 /**
  * Manages the Pinggy SSH reverse tunnel using an embedded pure Java SSH client (JSch).
- * Features continuous chunk-based stream parsing, ANSI/VT100 terminal stripping,
- * manual on-demand renewal via the UI button, and zero auto-timeout disconnects.
+ * Features:
+ * - Robust URL validation and immediate registration with Cloudflare Worker
+ * - Continuous non-blocking chunk parsing without waiting for newlines
+ * - Terminal screen-redraw spam filtering (stops repetitive logs once connected)
+ * - Infinite socket read timeout to prevent fast 20-second connection drops
+ * - Automatic background renewal when tunnel is approaching expiration (<= 10 min)
+ * - Manual on-demand renewal via the UI button
  */
 class PinggyManager(
     private val context: Context,
@@ -118,12 +123,12 @@ class PinggyManager(
         }
 
         /**
-         * Extracts a public Pinggy HTTPS URL from raw terminal text chunks.
+         * Validates and extracts a clean Pinggy HTTPS URL from raw terminal text.
          */
         fun extractPublicUrl(input: String): String? {
             val clean = cleanTerminalOutput(input)
             val match = pinggyUrlRegex.find(clean) ?: return null
-            val candidate = match.value
+            val candidate = match.value.trim()
             val host = candidate.substringAfter("://").substringBefore('/').substringBefore(':').lowercase()
             if (!EXCLUDED_HOSTS.contains(host)) {
                 return candidate
@@ -160,6 +165,7 @@ class PinggyManager(
     private var renewingChannel: Channel? = null
 
     private var retryFuture: ScheduledFuture<*>? = null
+    private var expiryWatchdogFuture: ScheduledFuture<*>? = null
     private var retryDelaySeconds = INITIAL_RETRY_DELAY_SECONDS
 
     /**
@@ -180,12 +186,14 @@ class PinggyManager(
         executor = Executors.newScheduledThreadPool(4)
         retryDelaySeconds = INITIAL_RETRY_DELAY_SECONDS
 
-        AppLogger.log("Pinggy", "Starting embedded SSH tunnel manager...")
+        AppLogger.log("Pinggy", "Starting embedded SSH tunnel...")
         updateState(TunnelState.STARTING, message = "Initializing...")
 
         executor?.execute {
             startTunnelSession(isRenewal = false)
         }
+
+        startExpiryWatchdog()
     }
 
     /**
@@ -198,7 +206,7 @@ class PinggyManager(
         }
         isRenewing.set(false)
 
-        AppLogger.log("Pinggy", "Stopping embedded SSH tunnel...")
+        AppLogger.log("Pinggy", "Stopping tunnel...")
         cancelScheduledTasks()
 
         disconnectSession(activeSession, activeChannel)
@@ -217,18 +225,18 @@ class PinggyManager(
     }
 
     /**
-     * Manual tunnel renewal triggered by the UI button.
+     * Tunnel renewal trigger (called via UI button or automatic expiry watchdog).
      * Guards against overlapping renewals and ensures obsolete sessions are closed.
      */
     fun renew() {
         if (!isRunning.get()) return
 
         if (!isRenewing.compareAndSet(false, true)) {
-            AppLogger.log("Pinggy", "Renewal already in progress, ignoring duplicate trigger")
+            AppLogger.log("Pinggy", "Renewal already in progress, skipping duplicate trigger")
             return
         }
 
-        AppLogger.log("Pinggy", "Renewal starting via button trigger...")
+        AppLogger.log("Pinggy", "Starting tunnel renewal...")
         updateState(TunnelState.RENEWING, message = "Renewing tunnel...")
 
         executor?.execute {
@@ -248,7 +256,7 @@ class PinggyManager(
 
     /**
      * Establishes the SSH connection using JSch, requests remote port forwarding,
-     * and monitors output streams without any automatic timeout disconnects.
+     * and monitors output streams with persistent socket configuration.
      */
     private fun startTunnelSession(
         isRenewal: Boolean,
@@ -259,11 +267,11 @@ class PinggyManager(
 
         // Stop creating replacement sessions while the current tunnel remains healthy
         if (!isRenewal && activeSession?.isConnected == true && currentInfo.state == TunnelState.CONNECTED) {
-            AppLogger.log("Pinggy", "Active tunnel is already healthy, skipping unnecessary connection")
+            AppLogger.log("Pinggy", "Active tunnel is already healthy, skipping redundant connection")
             return
         }
 
-        AppLogger.log("Pinggy", "Connecting to $PINGGY_HOST:$PINGGY_PORT via embedded SSH...")
+        AppLogger.log("Pinggy", "Connecting to $PINGGY_HOST:$PINGGY_PORT...")
         updateState(
             if (isRenewal) TunnelState.RENEWING else TunnelState.CONNECTING,
             message = "Connecting to $PINGGY_HOST..."
@@ -289,13 +297,16 @@ class PinggyManager(
                 override fun promptYesNo(message: String?): Boolean = true
                 override fun showMessage(message: String?) {}
             }
+
+            // Keepalive settings: send heartbeat every 30s to keep connection open 24/7
             session.setServerAliveInterval(30000)
             session.setServerAliveCountMax(3)
-            session.setTimeout(20000)
 
+            // CRITICAL: Handshake timeout is 20s, but socket read timeout is set to 0 (infinite)
+            // Setting a non-zero read timeout causes JSch to drop idle reverse tunnels every 20s!
             session.connect(20000)
+            session.setTimeout(0) // 0 = infinite read timeout, keeping tunnel permanently open
             newSession = session
-            AppLogger.log("Pinggy", "SSH session established, requesting remote port forwarding...")
 
             // Set remote port forwarding: remote port 0 (dynamic), local 127.0.0.1:LOCAL_FORWARD_PORT
             session.setPortForwardingR(0, "127.0.0.1", LOCAL_FORWARD_PORT)
@@ -314,7 +325,7 @@ class PinggyManager(
                 activeChannel = channel
             }
 
-            AppLogger.log("Pinggy", "SSH channel opened, reading output stream chunks for public URL...")
+            AppLogger.log("Pinggy", "SSH session established, awaiting public URL...")
 
             urlDetected = monitorChannelOutput(
                 session = session,
@@ -339,7 +350,7 @@ class PinggyManager(
             disconnectSession(newSession, newChannel)
 
             if (isRenewal) {
-                AppLogger.log("Pinggy", "Renewal session failed or disconnected. Retaining previous session.")
+                AppLogger.log("Pinggy", "Renewal session disconnected. Retaining previous session.")
                 if (oldSessionToClose != null && oldSessionToClose.isConnected) {
                     updateState(TunnelState.CONNECTED, message = "Connected (renewal retried later)")
                     return
@@ -352,16 +363,15 @@ class PinggyManager(
             }
 
             if (isRunning.get()) {
-                AppLogger.log("Pinggy", "Triggering tunnel reconnect...")
+                AppLogger.log("Pinggy", "Tunnel session ended, scheduling reconnect...")
                 scheduleReconnect()
             }
         }
     }
 
     /**
-     * Reads stdout and stderr chunks continuously without waiting for newlines,
-     * strips ANSI formatting, and parses the public URL immediately.
-     * Operates without automatic timeout cutting off the stream.
+     * Reads output chunks, extracts the public URL, registers with Cloudflare Worker,
+     * and suppresses repetitive terminal screen-redraw logs once connected.
      */
     private fun monitorChannelOutput(
         session: Session,
@@ -375,13 +385,26 @@ class PinggyManager(
         var isUrlFound = false
         var parsedExpiryMinutes = DEFAULT_EXPIRY_MINUTES
 
-        // Callback invoked on every received chunk from stdout or stderr
+        // Callback invoked on every received chunk from stdout
         val processChunk: (String, String) -> Unit = { rawChunk, streamName ->
             val cleanChunk = cleanTerminalOutput(rawChunk)
             if (cleanChunk.isNotBlank()) {
-                AppLogger.log("Pinggy", "SSH [$streamName]: $cleanChunk")
-
                 synchronized(bufferLock) {
+                    // Suppress repetitive terminal redraw spam once connected
+                    val isConnected = isUrlFound || (currentInfo.state == TunnelState.CONNECTED && currentInfo.publicUrl != null)
+                    val containsError = cleanChunk.contains("error", ignoreCase = true) ||
+                            cleanChunk.contains("denied", ignoreCase = true) ||
+                            cleanChunk.contains("failed", ignoreCase = true)
+
+                    if (!isConnected) {
+                        // Before connection is established, log non-blank setup messages
+                        if (cleanChunk.length > 5 && !cleanChunk.all { it.isWhitespace() || it == '│' || it == '─' || it == '┌' || it == '└' }) {
+                            AppLogger.log("Pinggy", "SSH: $cleanChunk")
+                        }
+                    } else if (containsError) {
+                        AppLogger.log("Pinggy", "SSH error notice: $cleanChunk")
+                    }
+
                     rollingBuffer.append(cleanChunk)
                     if (rollingBuffer.length > 8192) {
                         rollingBuffer.delete(0, rollingBuffer.length - 4096)
@@ -412,9 +435,7 @@ class PinggyManager(
                         if (matchedUrl != null) {
                             isUrlFound = true
 
-                            AppLogger.log("Pinggy", "SSH connected")
                             AppLogger.log("Pinggy", "Public URL detected: $matchedUrl")
-
                             retryDelaySeconds = INITIAL_RETRY_DELAY_SECONDS
 
                             if (isRenewal) {
@@ -423,7 +444,7 @@ class PinggyManager(
                                 // Close obsolete previous session after brief 3-second grace period
                                 oldSessionToClose?.let { old ->
                                     executor?.schedule({
-                                        AppLogger.log("Pinggy", "Closing obsolete previous session following successful renewal")
+                                        AppLogger.log("Pinggy", "Closing obsolete previous session following renewal")
                                         disconnectSession(old, oldChannelToClose)
                                     }, 3, TimeUnit.SECONDS)
                                 }
@@ -443,25 +464,27 @@ class PinggyManager(
                                 message = "Connected ($parsedExpiryMinutes min)"
                             )
 
-                            // Register with Kineflex asynchronously
-                            registerUrlWithKineflex(matchedUrl, expiresAt)
+                            // Send URL to Cloudflare Worker immediately in background thread
+                            sendUrlToWorker(matchedUrl, expiresAt)
                         }
                     }
                 }
             }
         }
 
-        // Dedicated chunk reader for stdout
-        executor?.submit {
+        // Dedicated daemon thread for stdout reading (does not occupy executor thread pool)
+        val stdoutThread = Thread({
             readStreamChunks(channel.inputStream, "stdout", session, channel, processChunk)
-        }
+        }, "Pinggy-StdoutReader").apply { isDaemon = true }
+        stdoutThread.start()
 
-        // Dedicated chunk reader for stderr
-        executor?.submit {
+        // Dedicated daemon thread for stderr reading
+        val stderrThread = Thread({
             readStreamChunks(channel.extInputStream, "stderr", session, channel, processChunk)
-        }
+        }, "Pinggy-StderrReader").apply { isDaemon = true }
+        stderrThread.start()
 
-        // Keep monitoring active session continuously until it disconnects (no auto-timeout!)
+        // Keep monitoring active session continuously until it disconnects (no auto-timeout killing the stream)
         try {
             while (isRunning.get() && session.isConnected && channel.isConnected) {
                 Thread.sleep(1000)
@@ -512,25 +535,51 @@ class PinggyManager(
     }
 
     /**
-     * Registers the public URL with Kineflex.
+     * Sends the public URL to Cloudflare Worker in a dedicated background thread.
      */
-    private fun registerUrlWithKineflex(publicUrl: String, expiresAt: Long) {
-        executor?.execute {
-            if (!isRunning.get()) return@execute
+    private fun sendUrlToWorker(publicUrl: String, expiresAt: Long) {
+        Thread({
+            try {
+                AppLogger.log("Pinggy", "Sending URL to Cloudflare Worker...")
+                val result = registration.register(
+                    registerUrl = REGISTER_URL,
+                    publicUrl = publicUrl,
+                    expiresAtSeconds = expiresAt
+                )
 
-            AppLogger.log("Pinggy", "Registering URL with Kineflex...")
-            val result = registration.register(
-                registerUrl = REGISTER_URL,
-                publicUrl = publicUrl,
-                expiresAtSeconds = expiresAt
-            )
-
-            if (result.success) {
-                AppLogger.log("Pinggy", "Registered URL successfully with Kineflex")
-            } else {
-                AppLogger.log("Pinggy", "Registration attempt failed: ${result.errorMessage}")
+                if (result.success) {
+                    AppLogger.log("Pinggy", "Registered URL successfully with Cloudflare Worker (HTTP ${result.statusCode})")
+                } else {
+                    AppLogger.log("Pinggy", "Worker registration failed: ${result.errorMessage}")
+                }
+            } catch (e: Exception) {
+                AppLogger.log("Pinggy", "Worker registration error: ${e.message}")
             }
-        }
+        }, "Pinggy-WorkerRegistration").start()
+    }
+
+    /**
+     * Periodic watchdog to check if the tunnel is approaching expiration (<= 10 min).
+     * If nearing expiration, automatically renews the tunnel seamlessly.
+     */
+    private fun startExpiryWatchdog() {
+        expiryWatchdogFuture?.cancel(false)
+        expiryWatchdogFuture = executor?.scheduleWithFixedDelay({
+            if (!isRunning.get() || currentInfo.state != TunnelState.CONNECTED) return@scheduleWithFixedDelay
+
+            val expiresAt = currentInfo.expiresAtTimestampSeconds ?: return@scheduleWithFixedDelay
+            val nowSeconds = System.currentTimeMillis() / 1000
+            val remainingSeconds = expiresAt - nowSeconds
+            val remainingMinutes = (remainingSeconds / 60).toInt()
+
+            if (remainingMinutes in 1..RENEW_BEFORE_EXPIRY_MINUTES) {
+                AppLogger.log(
+                    "Pinggy",
+                    "Tunnel is near expiration (~$remainingMinutes min left). Automatically renewing..."
+                )
+                renew()
+            }
+        }, 30, 30, TimeUnit.SECONDS)
     }
 
     /**
@@ -597,6 +646,8 @@ class PinggyManager(
     private fun cancelScheduledTasks() {
         retryFuture?.cancel(true)
         retryFuture = null
+        expiryWatchdogFuture?.cancel(true)
+        expiryWatchdogFuture = null
     }
 
     private fun updateState(
