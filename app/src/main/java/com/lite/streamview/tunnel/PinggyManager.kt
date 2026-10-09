@@ -10,17 +10,14 @@ import com.jcraft.jsch.UserInfo
 import com.lite.streamview.registration.KineflexRegistration
 import com.lite.streamview.server.LiteHttpServer
 import com.lite.streamview.util.AppLogger
-import java.io.BufferedReader
 import java.io.File
 import java.io.InputStream
-import java.io.InputStreamReader
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import java.util.regex.Pattern
 
 /**
@@ -49,8 +46,8 @@ data class TunnelInfo(
 
 /**
  * Manages the Pinggy SSH reverse tunnel using an embedded pure Java SSH client (JSch).
- * Features concurrent stdout/stderr stream reading, full diagnostic output logging,
- * dedicated URL receipt timeout, race-free renewal protection, and reliable session cleanup.
+ * Features continuous chunk-based parsing, ANSI/VT100 terminal stripping, race-free URL detection,
+ * non-blocking concurrent stream reading, and leak-free renewal management.
  */
 class PinggyManager(
     private val context: Context,
@@ -68,7 +65,7 @@ class PinggyManager(
 
         /**
          * Target port for Pinggy reverse tunnel forward (-R0:localhost:<PORT>).
-         * Set to match the embedded Android LiteHttpServer port (7777).
+         * Matches the embedded Android LiteHttpServer port (7777).
          */
         const val PINGGY_TARGET_PORT = LiteHttpServer.LOCAL_SERVER_PORT
         const val LOCAL_FORWARD_PORT = PINGGY_TARGET_PORT
@@ -89,23 +86,20 @@ class PinggyManager(
         const val INITIAL_RETRY_DELAY_SECONDS = 5L
         const val MAX_RETRY_DELAY_SECONDS = 60L
 
-        // Regex to strip ANSI escape sequences from terminal banner
-        val ANSI_PATTERN = Regex("\u001B\\[[;?0-9]*[a-zA-Z]")
-
-        // Robust regex patterns to extract public HTTPS URLs from Pinggy SSH output
-        private val PINGGY_URL_PATTERN = Pattern.compile(
-            """https://([a-zA-Z0-9-.]+\.(?:pinggy\.link|free\.pinggy\.net|run\.pinggy-free\.link|pinggy-free\.link|free\.pinggy\.io|pinggy\.online|pinggy\.io|pinggy-free\.me))(?::\d+)?(?:/[^\s]*)?""",
-            Pattern.CASE_INSENSITIVE
+        // Robust regex to extract Pinggy public URLs from interactive terminal chunks
+        val PINGGY_URL_REGEX = Regex(
+            """https://[a-zA-Z0-9.-]+\.(?:free\.pinggy\.net|run\.pinggy-free\.link|pinggy\.link|free\.pinggy\.io|pinggy-free\.link|free\.pinggy\.online|pinggy\.online|pinggy\.io|pinggy-free\.me)(?::\d+)?""",
+            RegexOption.IGNORE_CASE
         )
 
         // Expiry pattern e.g. "Your tunnel will expire in 60 minutes."
-        private val EXPIRY_PATTERN = Pattern.compile(
+        val EXPIRY_PATTERN = Pattern.compile(
             """expire(?:s)?\s+in\s+(\d+)\s+minute""",
             Pattern.CASE_INSENSITIVE
         )
 
         // Domains that belong to Pinggy admin/dashboard, not public tunnels
-        private val EXCLUDED_HOSTS = setOf(
+        val EXCLUDED_HOSTS = setOf(
             "dashboard.pinggy.io",
             "pinggy.io",
             "api.pinggy.io",
@@ -113,6 +107,32 @@ class PinggyManager(
             "docs.pinggy.io",
             "openssh.com"
         )
+
+        /**
+         * Strips VT100/ANSI escape sequences, terminal box characters, and control codes
+         * from interactive terminal output chunks.
+         */
+        fun cleanTerminalOutput(input: String): String {
+            return input
+                .replace(Regex("""\u001B\[[0-?]*[ -/]*[@-~]"""), "")
+                .replace(Regex("""\u001B\][^\u0007]*(?:\u0007|\u001B\\)"""), "")
+                .replace(Regex("""\u001B[()][0-2A-Z]"""), "")
+                .replace(Regex("""[\u0000-\u001F\u007F]"""), " ")
+        }
+
+        /**
+         * Extracts a public Pinggy HTTPS URL from raw terminal text chunks.
+         */
+        fun extractPublicUrl(input: String): String? {
+            val clean = cleanTerminalOutput(input)
+            val match = PINGGY_URL_REGEX.find(clean) ?: return null
+            val candidate = match.value
+            val host = candidate.substringAfter("://").substringBefore('/').substringBefore(':').lowercase()
+            if (!EXCLUDED_HOSTS.contains(host)) {
+                return candidate
+            }
+            return null
+        }
     }
 
     // UI listener callback
@@ -154,6 +174,12 @@ class PinggyManager(
     @Synchronized
     fun start() {
         if (isRunning.getAndSet(true)) {
+            return
+        }
+
+        // Avoid starting duplicate sessions if active tunnel is already connected
+        if (activeSession?.isConnected == true && currentInfo.state == TunnelState.CONNECTED) {
+            AppLogger.log("Pinggy", "Active tunnel is already connected and healthy.")
             return
         }
 
@@ -288,7 +314,7 @@ class PinggyManager(
                 activeChannel = channel
             }
 
-            AppLogger.log("Pinggy", "SSH channel opened, reading output for public URL (timeout: ${URL_DETECTION_TIMEOUT_SECONDS}s)...")
+            AppLogger.log("Pinggy", "SSH channel opened, reading stream chunks for public URL...")
 
             urlDetected = monitorChannelOutput(
                 session = session,
@@ -336,8 +362,8 @@ class PinggyManager(
     }
 
     /**
-     * Reads stdout and stderr concurrently without stalling the manager,
-     * logs every received line, captures stream exceptions, and enforces a URL detection timeout.
+     * Reads stdout and stderr chunks continuously without waiting for newlines,
+     * strips ANSI formatting, matches the public URL immediately, and prevents race conditions with timeouts.
      */
     private fun monitorChannelOutput(
         session: Session,
@@ -346,110 +372,132 @@ class PinggyManager(
         oldSessionToClose: Session?,
         oldChannelToClose: Channel?
     ): Boolean {
+        val connectionLock = Any()
+        var isUrlDetected = false
+        var isTimedOut = false
+
         val urlDetectedLatch = CountDownLatch(1)
-        val detectedUrlRef = AtomicReference<String?>(null)
+        val rollingBuffer = StringBuilder()
         var parsedExpiryMinutes = DEFAULT_EXPIRY_MINUTES
+        var urlTimeoutFuture: ScheduledFuture<*>? = null
 
-        val processLine: (String, String) -> Unit = { rawLine, streamName ->
-            val cleanLine = rawLine.replace(ANSI_PATTERN, "").trim()
-            if (cleanLine.isNotBlank()) {
-                // Log every received line after stripping ANSI escape sequences
-                AppLogger.log("Pinggy", "SSH [$streamName]: $cleanLine")
+        // Schedule timeout for URL detection
+        urlTimeoutFuture = executor?.schedule({
+            synchronized(connectionLock) {
+                if (isUrlDetected) {
+                    return@schedule
+                }
+                isTimedOut = true
+                AppLogger.log(
+                    "Pinggy",
+                    "URL detection timed out after ${URL_DETECTION_TIMEOUT_SECONDS}s without public URL"
+                )
+                updateState(
+                    TunnelState.ERROR,
+                    message = "URL detection timeout (${URL_DETECTION_TIMEOUT_SECONDS}s)"
+                )
+                disconnectSession(session, channel)
+                urlDetectedLatch.countDown()
+            }
+        }, URL_DETECTION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
 
-                // Check for expiry information
-                val expiryMatcher = EXPIRY_PATTERN.matcher(cleanLine)
-                if (expiryMatcher.find()) {
-                    val minutes = expiryMatcher.group(1)?.toIntOrNull()
-                    if (minutes != null && minutes > 0) {
-                        parsedExpiryMinutes = minutes
+        // Callback invoked on every received chunk from stdout or stderr
+        val processChunk: (String, String) -> Unit = { rawChunk, streamName ->
+            val cleanChunk = cleanTerminalOutput(rawChunk)
+            if (cleanChunk.isNotBlank()) {
+                AppLogger.log("Pinggy", "SSH [$streamName]: $cleanChunk")
+
+                synchronized(connectionLock) {
+                    if (!isTimedOut && !isUrlDetected) {
+                        rollingBuffer.append(cleanChunk)
+                        if (rollingBuffer.length > 8192) {
+                            rollingBuffer.delete(0, rollingBuffer.length - 4096)
+                        }
+
+                        val currentBuffer = rollingBuffer.toString()
+
+                        // Check for expiry information
+                        val expiryMatcher = EXPIRY_PATTERN.matcher(currentBuffer)
+                        if (expiryMatcher.find()) {
+                            val minutes = expiryMatcher.group(1)?.toIntOrNull()
+                            if (minutes != null && minutes > 0) {
+                                parsedExpiryMinutes = minutes
+                            }
+                        }
+
+                        // Check for public URL continuously
+                        val matchedUrl = extractPublicUrl(currentBuffer)
+                        if (matchedUrl != null) {
+                            isUrlDetected = true
+                            urlTimeoutFuture?.cancel(false)
+                            urlTimeoutFuture = null
+
+                            AppLogger.log("Pinggy", "SSH connected")
+                            AppLogger.log("Pinggy", "Public URL detected: $matchedUrl")
+
+                            retryDelaySeconds = INITIAL_RETRY_DELAY_SECONDS
+
+                            if (isRenewal) {
+                                activeSession = session
+                                activeChannel = channel
+                                // Close obsolete previous session after brief 3-second grace period
+                                oldSessionToClose?.let { old ->
+                                    executor?.schedule({
+                                        AppLogger.log("Pinggy", "Closing obsolete previous session following successful renewal")
+                                        disconnectSession(old, oldChannelToClose)
+                                    }, 3, TimeUnit.SECONDS)
+                                }
+                            } else {
+                                activeSession = session
+                                activeChannel = channel
+                            }
+
+                            val nowSeconds = System.currentTimeMillis() / 1000
+                            val expiresAt = nowSeconds + (parsedExpiryMinutes * 60)
+
+                            updateState(
+                                TunnelState.CONNECTED,
+                                publicUrl = matchedUrl,
+                                expiresAtSeconds = expiresAt,
+                                remainingMinutes = parsedExpiryMinutes,
+                                message = "Connected ($parsedExpiryMinutes min)"
+                            )
+
+                            // Register with Kineflex asynchronously
+                            registerUrlWithKineflex(matchedUrl, expiresAt)
+
+                            // Schedule proactive renewal before expiry
+                            scheduleProactiveRenewal(parsedExpiryMinutes)
+
+                            urlDetectedLatch.countDown()
+                        }
                     }
                 }
-
-                // Check for public HTTPS URL
-                if (detectedUrlRef.get() == null) {
-                    val parsed = extractPublicUrl(cleanLine)
-                    if (parsed != null && detectedUrlRef.compareAndSet(null, parsed)) {
-                        AppLogger.log("Pinggy", "SSH connected")
-                        AppLogger.log("Pinggy", "Public URL detected: $parsed")
-                        urlDetectedLatch.countDown()
-                    }
-                }
             }
         }
 
-        // Dedicated concurrent worker to read stdout
+        // Dedicated chunk reader for stdout
         executor?.submit {
-            try {
-                val reader = BufferedReader(InputStreamReader(channel.inputStream, Charsets.UTF_8))
-                while (isRunning.get() && session.isConnected && channel.isConnected) {
-                    val line = reader.readLine() ?: break
-                    processLine(line, "stdout")
-                }
-            } catch (e: Exception) {
-                if (isRunning.get() && session.isConnected) {
-                    AppLogger.log("Pinggy", "Stream read error (stdout): ${e.javaClass.simpleName}: ${e.message}")
-                }
-            }
+            readStreamChunks(channel.inputStream, "stdout", session, channel, processChunk)
         }
 
-        // Dedicated concurrent worker to read stderr / extended stream
+        // Dedicated chunk reader for stderr
         executor?.submit {
-            try {
-                val errStream = channel.extInputStream
-                val reader = BufferedReader(InputStreamReader(errStream, Charsets.UTF_8))
-                while (isRunning.get() && session.isConnected && channel.isConnected) {
-                    val line = reader.readLine() ?: break
-                    processLine(line, "stderr")
-                }
-            } catch (e: Exception) {
-                if (isRunning.get() && session.isConnected) {
-                    AppLogger.log("Pinggy", "Stream read error (stderr): ${e.javaClass.simpleName}: ${e.message}")
-                }
-            }
+            readStreamChunks(channel.extInputStream, "stderr", session, channel, processChunk)
         }
 
-        // Await public URL detection with URL_DETECTION_TIMEOUT_SECONDS timeout
-        val detected = try {
-            urlDetectedLatch.await(URL_DETECTION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        // Wait for URL detection or timeout
+        try {
+            urlDetectedLatch.await(URL_DETECTION_TIMEOUT_SECONDS + 2, TimeUnit.SECONDS)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
-            false
         }
 
-        val detectedUrl = detectedUrlRef.get()
+        val success = synchronized(connectionLock) {
+            isUrlDetected && !isTimedOut
+        }
 
-        if (detected && detectedUrl != null) {
-            retryDelaySeconds = INITIAL_RETRY_DELAY_SECONDS
-
-            if (isRenewal) {
-                activeSession = session
-                activeChannel = channel
-                // Close obsolete previous session after 3-second grace period
-                oldSessionToClose?.let { old ->
-                    executor?.schedule({
-                        AppLogger.log("Pinggy", "Closing obsolete previous session following successful renewal")
-                        disconnectSession(old, oldChannelToClose)
-                    }, 3, TimeUnit.SECONDS)
-                }
-            }
-
-            val nowSeconds = System.currentTimeMillis() / 1000
-            val expiresAt = nowSeconds + (parsedExpiryMinutes * 60)
-
-            updateState(
-                TunnelState.CONNECTED,
-                publicUrl = detectedUrl,
-                expiresAtSeconds = expiresAt,
-                remainingMinutes = parsedExpiryMinutes,
-                message = "Connected ($parsedExpiryMinutes min)"
-            )
-
-            // Register URL with Kineflex asynchronously
-            registerUrlWithKineflex(detectedUrl, expiresAt)
-
-            // Schedule proactive renewal before expiry
-            scheduleProactiveRenewal(parsedExpiryMinutes)
-
+        if (success) {
             // Keep monitoring active session until it disconnects
             try {
                 while (isRunning.get() && session.isConnected && channel.isConnected) {
@@ -470,33 +518,37 @@ class PinggyManager(
             }
 
             return true
-        } else {
-            AppLogger.log(
-                "Pinggy",
-                "URL detection timed out after ${URL_DETECTION_TIMEOUT_SECONDS}s without finding public URL"
-            )
-            updateState(
-                TunnelState.ERROR,
-                message = "URL detection timeout (${URL_DETECTION_TIMEOUT_SECONDS}s)"
-            )
-            return false
         }
+
+        return false
     }
 
     /**
-     * Extracts a public Pinggy HTTPS URL from an output line, excluding admin/dashboard domains.
+     * Reads byte chunks continuously from an InputStream without waiting for newlines.
      */
-    fun extractPublicUrl(line: String): String? {
-        val clean = line.replace(ANSI_PATTERN, "")
-        val matcher = PINGGY_URL_PATTERN.matcher(clean)
-        while (matcher.find()) {
-            val candidate = matcher.group() ?: continue
-            val host = candidate.substringAfter("://").substringBefore('/').substringBefore(':').lowercase()
-            if (!EXCLUDED_HOSTS.contains(host)) {
-                return candidate
+    private fun readStreamChunks(
+        stream: InputStream,
+        streamName: String,
+        session: Session,
+        channel: Channel,
+        onChunk: (String, String) -> Unit
+    ) {
+        val buffer = ByteArray(2048)
+        try {
+            var bytesRead: Int
+            while (isRunning.get() && session.isConnected && channel.isConnected) {
+                bytesRead = stream.read(buffer)
+                if (bytesRead == -1) break
+                if (bytesRead > 0) {
+                    val rawChunk = String(buffer, 0, bytesRead, Charsets.UTF_8)
+                    onChunk(rawChunk, streamName)
+                }
+            }
+        } catch (e: Exception) {
+            if (isRunning.get() && session.isConnected) {
+                AppLogger.log("Pinggy", "Stream read notice ($streamName): ${e.javaClass.simpleName}: ${e.message}")
             }
         }
-        return null
     }
 
     /**
@@ -563,9 +615,16 @@ class PinggyManager(
 
     /**
      * Schedules a reconnect attempt with exponential backoff.
+     * Prevents reconnecting if an active tunnel is already healthy.
      */
     private fun scheduleReconnect() {
         if (!isRunning.get()) return
+
+        // Stop creating replacement sessions while the current tunnel remains healthy
+        if (activeSession?.isConnected == true && currentInfo.state == TunnelState.CONNECTED) {
+            AppLogger.log("Pinggy", "Active tunnel is already healthy, skipping unnecessary reconnect")
+            return
+        }
 
         retryFuture?.cancel(false)
         val delay = retryDelaySeconds

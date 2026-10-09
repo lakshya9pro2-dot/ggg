@@ -96,4 +96,26 @@ class PinggyManagerTest {
         assertEquals(true, m2.find())
         assertEquals("55", m2.group(1))
     }
+
+    @Test
+    fun testCleanTerminalOutput() {
+        val raw = "\u001B[2J\u001B[H\u001B[32mTunnel Connected!\u001B[0m\r\n\u001B(0lqqk\u001B(B"
+        val cleaned = PinggyManager.cleanTerminalOutput(raw)
+        assertEquals(false, cleaned.contains("\u001B"))
+        assertEquals(true, cleaned.contains("Tunnel Connected!"))
+    }
+
+    @Test
+    fun testExtractRealInteractivePinggyUrls() {
+        // Real URLs observed in Pinggy interactive terminal UI
+        val chunk1 = "\u001B[2J\u001B[H┌────────────────────────────────────────────────────────┐\r\n" +
+                "│  https://jwxgo-103-95-164-167.free.pinggy.net          │\r\n" +
+                "└────────────────────────────────────────────────────────┘"
+        val url1 = PinggyManager.extractPublicUrl(chunk1)
+        assertEquals("https://jwxgo-103-95-164-167.free.pinggy.net", url1)
+
+        val chunk2 = "\u001B[1;34mYour URL: \u001B[4mhttps://kuhzc-103-95-164-167.run.pinggy-free.link\u001B[0m"
+        val url2 = PinggyManager.extractPublicUrl(chunk2)
+        assertEquals("https://kuhzc-103-95-164-167.run.pinggy-free.link", url2)
+    }
 }
