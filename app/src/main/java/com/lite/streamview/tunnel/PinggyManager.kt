@@ -127,11 +127,14 @@ class PinggyManager(
          */
         fun extractPublicUrl(input: String): String? {
             val clean = cleanTerminalOutput(input)
-            val match = pinggyUrlRegex.find(clean) ?: return null
-            val candidate = match.value.trim()
-            val host = candidate.substringAfter("://").substringBefore('/').substringBefore(':').lowercase()
-            if (!EXCLUDED_HOSTS.contains(host)) {
-                return candidate
+            // IMPORTANT: scan ALL matches. Pinggy prints the dashboard link
+            // (https://dashboard.pinggy.io) BEFORE the tunnel URLs, so taking only the
+            // first match always hit the excluded host and returned null.
+            for (match in pinggyUrlRegex.findAll(clean)) {
+                val candidate = match.value.trim()
+                val host = candidate.substringAfter("://").substringBefore('/').substringBefore(':').lowercase()
+                if (host in EXCLUDED_HOSTS || host.startsWith("dashboard.")) continue
+                return candidate.lowercase()
             }
             return null
         }
@@ -318,6 +321,7 @@ class PinggyManager(
             val channel = session.openChannel("shell") as ChannelShell
             channel.setPty(true)
             channel.setPtyType("vt100")
+            channel.setPtySize(200, 50, 0, 0) // wide terminal: long URLs never wrap
             channel.connect(15000)
             newChannel = channel
 
@@ -349,16 +353,21 @@ class PinggyManager(
             }
         }
 
-        if (!isRenewal && isRunning.get()) {
-            disconnectSession(newSession, newChannel)
-            if (activeSession == newSession) {
-                activeSession = null
-                activeChannel = null
+        if (!isRunning.get()) return
+
+        // monitorChannelOutput() nulls activeSession only when it equals this session,
+        // so a non-null different activeSession means a renewed session replaced us.
+        val replaced = activeSession != null && activeSession !== newSession
+        disconnectSession(newSession, newChannel)
+
+        if (!isRenewal || urlDetected) {
+            if (replaced) {
+                AppLogger.log("Pinggy", "Old session closed (replaced by renewed tunnel)")
+            } else {
+                AppLogger.log("Pinggy", "Tunnel session ended, scheduling reconnect...")
+                scheduleReconnect()
             }
-            AppLogger.log("Pinggy", "Tunnel session ended, scheduling reconnect...")
-            scheduleReconnect()
-        } else if (isRenewal && !urlDetected) {
-            disconnectSession(newSession, newChannel)
+        } else {
             AppLogger.log("Pinggy", "Renewal session disconnected. Retaining previous session.")
             if (oldSessionToClose != null && oldSessionToClose.isConnected) {
                 updateState(TunnelState.CONNECTED, message = "Connected (renewal retried later)")
@@ -383,6 +392,7 @@ class PinggyManager(
         val rollingBuffer = StringBuilder()
         var isUrlFound = false
         var parsedExpiryMinutes = DEFAULT_EXPIRY_MINUTES
+        var lastLoggedLine = ""
 
         // Callback invoked on every received chunk from stdout
         val processChunk: (String, String) -> Unit = { rawChunk, _ ->
@@ -394,8 +404,10 @@ class PinggyManager(
                     // Before connection is established, log non-blank setup messages (skip border noise)
                     if (!isConnected) {
                         val isNoise = cleanChunk.all { it.isWhitespace() || it == '│' || it == '─' || it == '┌' || it == '└' || it == '┼' || it == '┤' || it == '├' }
-                        if (!isNoise && cleanChunk.length > 3) {
-                            AppLogger.log("Pinggy", "SSH: $cleanChunk")
+                        val trimmed = cleanChunk.trim()
+                        if (!isNoise && trimmed.length > 3 && trimmed != lastLoggedLine) {
+                            lastLoggedLine = trimmed
+                            AppLogger.log("Pinggy", "SSH: $trimmed")
                         }
                     }
 
@@ -425,6 +437,7 @@ class PinggyManager(
                             if (isRenewal) {
                                 activeSession = session
                                 activeChannel = channel
+                                isRenewing.set(false) // allow the next renewal later
                                 // Close obsolete previous session after brief 3-second grace period
                                 oldSessionToClose?.let { old ->
                                     executor?.schedule({
@@ -459,14 +472,22 @@ class PinggyManager(
             Thread.currentThread().interrupt()
         }
 
-        if (activeSession == session) {
+        val wasActive = activeSession == null || activeSession === session
+        if (activeSession === session) {
             activeSession = null
             activeChannel = null
         }
 
-        if (isRunning.get()) {
+        if (isRunning.get() && wasActive) {
             AppLogger.log("Pinggy", "SSH session disconnected")
-            updateState(TunnelState.DISCONNECTED, message = "Tunnel disconnected")
+            lastRegisteredUrl = null
+            updateState(
+                TunnelState.DISCONNECTED,
+                publicUrl = null,
+                expiresAtSeconds = null,
+                remainingMinutes = null,
+                message = "Tunnel disconnected"
+            )
         }
 
         return isUrlFound
@@ -540,27 +561,31 @@ class PinggyManager(
             ?: ((System.currentTimeMillis() / 1000) + (DEFAULT_EXPIRY_MINUTES * 60))
 
         Thread({
-            try {
-                AppLogger.log("API", "Sending URL to Cloudflare Worker: $publicUrl (expires: $expiresAt)")
-                val result = registration.register(
-                    registerUrl = REGISTER_URL,
-                    publicUrl = publicUrl,
-                    expiresAtSeconds = expiresAt
-                )
-
-                if (result.success) {
-                    AppLogger.log("API", "POST /api/app — Success (HTTP 200)")
-                    callback?.invoke(true, null)
-                } else {
-                    val errorMsg = result.errorMessage ?: "HTTP ${result.statusCode}"
-                    AppLogger.log("API", "POST /api/app — Error: $errorMsg")
-                    callback?.invoke(false, errorMsg)
+            var lastError: String? = null
+            for (attempt in 1..3) {
+                try {
+                    AppLogger.log("API", "Sending URL to Worker (try $attempt/3): $publicUrl")
+                    val result = registration.register(
+                        registerUrl = REGISTER_URL,
+                        publicUrl = publicUrl,
+                        expiresAtSeconds = expiresAt
+                    )
+                    if (result.success) {
+                        AppLogger.log("API", "POST /api/app — Success (HTTP ${result.statusCode})")
+                        callback?.invoke(true, null)
+                        return@Thread
+                    }
+                    lastError = result.errorMessage ?: "HTTP ${result.statusCode}"
+                    AppLogger.log("API", "POST /api/app — Error: $lastError")
+                } catch (e: Exception) {
+                    lastError = e.message ?: "Unknown network error"
+                    AppLogger.log("API", "Worker registration exception: $lastError")
                 }
-            } catch (e: Exception) {
-                val errorMsg = e.message ?: "Unknown network error"
-                AppLogger.log("API", "Worker registration exception: $errorMsg")
-                callback?.invoke(false, errorMsg)
+                if (attempt < 3) {
+                    try { Thread.sleep(3000L * attempt) } catch (_: InterruptedException) { break }
+                }
             }
+            callback?.invoke(false, lastError)
         }, "Pinggy-WorkerRegistration").start()
     }
 
