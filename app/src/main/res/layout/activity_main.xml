@@ -287,6 +287,15 @@
                                 android:text="Renew"
                                 android:textSize="11sp"
                                 android:textColor="@color/primary" />
+
+                            <Button
+                                android:id="@+id/btnSendApi"
+                                style="?android:attr/borderlessButtonStyle"
+                                android:layout_width="wrap_content"
+                                android:layout_height="30dp"
+                                android:text="Send API"
+                                android:textSize="11sp"
+                                android:textColor="@color/primary" />
                         </LinearLayout>
 
                         <!-- Local Server + Expiry Row -->
@@ -370,6 +379,16 @@
                     android:textSize="12sp"
                     android:textStyle="bold"
                     android:textColor="#A7F3D0" />
+
+                <TextView
+                    android:id="@+id/btnToggleLogs"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="[ Stop Logs ]"
+                    android:textSize="11sp"
+                    android:textColor="#90CAF9"
+                    android:padding="4dp"
+                    android:layout_marginEnd="6dp" />
 
                 <TextView
                     android:id="@+id/btnClearLogs"

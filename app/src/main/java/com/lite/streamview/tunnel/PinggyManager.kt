@@ -168,6 +168,10 @@ class PinggyManager(
     private var expiryWatchdogFuture: ScheduledFuture<*>? = null
     private var retryDelaySeconds = INITIAL_RETRY_DELAY_SECONDS
 
+    @Volatile
+    private var lastRegisteredUrl: String? = null
+    private var lastAutoRenewTimestampMs = 0L
+
     /**
      * Starts the Pinggy tunnel manager and begins the connection process in the background.
      */
@@ -345,25 +349,20 @@ class PinggyManager(
             }
         }
 
-        if (!urlDetected) {
-            // Clean up the failed session
+        if (!isRenewal && isRunning.get()) {
             disconnectSession(newSession, newChannel)
-
-            if (isRenewal) {
-                AppLogger.log("Pinggy", "Renewal session disconnected. Retaining previous session.")
-                if (oldSessionToClose != null && oldSessionToClose.isConnected) {
-                    updateState(TunnelState.CONNECTED, message = "Connected (renewal retried later)")
-                    return
-                }
-            }
-
             if (activeSession == newSession) {
                 activeSession = null
                 activeChannel = null
             }
-
-            if (isRunning.get()) {
-                AppLogger.log("Pinggy", "Tunnel session ended, scheduling reconnect...")
+            AppLogger.log("Pinggy", "Tunnel session ended, scheduling reconnect...")
+            scheduleReconnect()
+        } else if (isRenewal && !urlDetected) {
+            disconnectSession(newSession, newChannel)
+            AppLogger.log("Pinggy", "Renewal session disconnected. Retaining previous session.")
+            if (oldSessionToClose != null && oldSessionToClose.isConnected) {
+                updateState(TunnelState.CONNECTED, message = "Connected (renewal retried later)")
+            } else {
                 scheduleReconnect()
             }
         }
@@ -386,23 +385,18 @@ class PinggyManager(
         var parsedExpiryMinutes = DEFAULT_EXPIRY_MINUTES
 
         // Callback invoked on every received chunk from stdout
-        val processChunk: (String, String) -> Unit = { rawChunk, streamName ->
+        val processChunk: (String, String) -> Unit = { rawChunk, _ ->
             val cleanChunk = cleanTerminalOutput(rawChunk)
             if (cleanChunk.isNotBlank()) {
                 synchronized(bufferLock) {
-                    // Suppress repetitive terminal redraw spam once connected
                     val isConnected = isUrlFound || (currentInfo.state == TunnelState.CONNECTED && currentInfo.publicUrl != null)
-                    val containsError = cleanChunk.contains("error", ignoreCase = true) ||
-                            cleanChunk.contains("denied", ignoreCase = true) ||
-                            cleanChunk.contains("failed", ignoreCase = true)
 
+                    // Before connection is established, log non-blank setup messages (skip border noise)
                     if (!isConnected) {
-                        // Before connection is established, log non-blank setup messages
-                        if (cleanChunk.length > 5 && !cleanChunk.all { it.isWhitespace() || it == '│' || it == '─' || it == '┌' || it == '└' }) {
+                        val isNoise = cleanChunk.all { it.isWhitespace() || it == '│' || it == '─' || it == '┌' || it == '└' || it == '┼' || it == '┤' || it == '├' }
+                        if (!isNoise && cleanChunk.length > 3) {
                             AppLogger.log("Pinggy", "SSH: $cleanChunk")
                         }
-                    } else if (containsError) {
-                        AppLogger.log("Pinggy", "SSH error notice: $cleanChunk")
                     }
 
                     rollingBuffer.append(cleanChunk)
@@ -418,14 +412,6 @@ class PinggyManager(
                         val minutes = expiryMatcher.group(1)?.toIntOrNull()
                         if (minutes != null && minutes > 0) {
                             parsedExpiryMinutes = minutes
-                            val nowSec = System.currentTimeMillis() / 1000
-                            val expSec = nowSec + (minutes * 60)
-                            updateState(
-                                state = TunnelState.CONNECTED,
-                                expiresAtSeconds = expSec,
-                                remainingMinutes = minutes,
-                                message = "Connected ($minutes min)"
-                            )
                         }
                     }
 
@@ -434,8 +420,6 @@ class PinggyManager(
                         val matchedUrl = extractPublicUrl(currentBuffer)
                         if (matchedUrl != null) {
                             isUrlFound = true
-
-                            AppLogger.log("Pinggy", "Public URL detected: $matchedUrl")
                             retryDelaySeconds = INITIAL_RETRY_DELAY_SECONDS
 
                             if (isRenewal) {
@@ -453,19 +437,7 @@ class PinggyManager(
                                 activeChannel = channel
                             }
 
-                            val nowSeconds = System.currentTimeMillis() / 1000
-                            val expiresAt = nowSeconds + (parsedExpiryMinutes * 60)
-
-                            updateState(
-                                TunnelState.CONNECTED,
-                                publicUrl = matchedUrl,
-                                expiresAtSeconds = expiresAt,
-                                remainingMinutes = parsedExpiryMinutes,
-                                message = "Connected ($parsedExpiryMinutes min)"
-                            )
-
-                            // Send URL to Cloudflare Worker immediately in background thread
-                            sendUrlToWorker(matchedUrl, expiresAt)
+                            checkAndRegisterUrl(matchedUrl, parsedExpiryMinutes)
                         }
                     }
                 }
@@ -477,12 +449,6 @@ class PinggyManager(
             readStreamChunks(channel.inputStream, "stdout", session, channel, processChunk)
         }, "Pinggy-StdoutReader").apply { isDaemon = true }
         stdoutThread.start()
-
-        // Dedicated daemon thread for stderr reading
-        val stderrThread = Thread({
-            readStreamChunks(channel.extInputStream, "stderr", session, channel, processChunk)
-        }, "Pinggy-StderrReader").apply { isDaemon = true }
-        stderrThread.start()
 
         // Keep monitoring active session continuously until it disconnects (no auto-timeout killing the stream)
         try {
@@ -535,12 +501,47 @@ class PinggyManager(
     }
 
     /**
-     * Sends the public URL to Cloudflare Worker in a dedicated background thread.
+     * Checks if candidateUrl is valid and new, updates tunnel state,
+     * and automatically registers it with the Cloudflare Worker.
      */
-    private fun sendUrlToWorker(publicUrl: String, expiresAt: Long) {
+    fun checkAndRegisterUrl(candidateUrl: String, expiryMinutes: Int = DEFAULT_EXPIRY_MINUTES) {
+        val nowSec = System.currentTimeMillis() / 1000
+        val expSec = nowSec + (expiryMinutes * 60)
+
+        val isNewUrl = (lastRegisteredUrl != candidateUrl)
+        lastRegisteredUrl = candidateUrl
+
+        updateState(
+            state = TunnelState.CONNECTED,
+            publicUrl = candidateUrl,
+            expiresAtSeconds = expSec,
+            remainingMinutes = expiryMinutes,
+            message = "Connected ($expiryMinutes min)"
+        )
+
+        if (isNewUrl) {
+            AppLogger.log("Pinggy", "Public URL detected: $candidateUrl")
+            sendUrlToWorker()
+        }
+    }
+
+    /**
+     * Sends the current public URL to Cloudflare Worker in a dedicated background thread.
+     */
+    fun sendUrlToWorker(callback: ((Boolean, String?) -> Unit)? = null) {
+        val publicUrl = currentUrl
+        if (publicUrl.isNullOrBlank()) {
+            val msg = "No active Pinggy URL to send"
+            AppLogger.log("API", msg)
+            callback?.invoke(false, msg)
+            return
+        }
+        val expiresAt = currentInfo.expiresAtTimestampSeconds
+            ?: ((System.currentTimeMillis() / 1000) + (DEFAULT_EXPIRY_MINUTES * 60))
+
         Thread({
             try {
-                AppLogger.log("Pinggy", "Sending URL to Cloudflare Worker...")
+                AppLogger.log("API", "Sending URL to Cloudflare Worker: $publicUrl (expires: $expiresAt)")
                 val result = registration.register(
                     registerUrl = REGISTER_URL,
                     publicUrl = publicUrl,
@@ -548,12 +549,17 @@ class PinggyManager(
                 )
 
                 if (result.success) {
-                    AppLogger.log("Pinggy", "Registered URL successfully with Cloudflare Worker (HTTP ${result.statusCode})")
+                    AppLogger.log("API", "POST /api/app — Success (HTTP 200)")
+                    callback?.invoke(true, null)
                 } else {
-                    AppLogger.log("Pinggy", "Worker registration failed: ${result.errorMessage}")
+                    val errorMsg = result.errorMessage ?: "HTTP ${result.statusCode}"
+                    AppLogger.log("API", "POST /api/app — Error: $errorMsg")
+                    callback?.invoke(false, errorMsg)
                 }
             } catch (e: Exception) {
-                AppLogger.log("Pinggy", "Worker registration error: ${e.message}")
+                val errorMsg = e.message ?: "Unknown network error"
+                AppLogger.log("API", "Worker registration exception: $errorMsg")
+                callback?.invoke(false, errorMsg)
             }
         }, "Pinggy-WorkerRegistration").start()
     }
@@ -572,14 +578,28 @@ class PinggyManager(
             val remainingSeconds = expiresAt - nowSeconds
             val remainingMinutes = (remainingSeconds / 60).toInt()
 
-            if (remainingMinutes in 1..RENEW_BEFORE_EXPIRY_MINUTES) {
-                AppLogger.log(
-                    "Pinggy",
-                    "Tunnel is near expiration (~$remainingMinutes min left). Automatically renewing..."
+            // Update remaining minutes in UI display
+            if (remainingMinutes >= 0 && remainingMinutes != currentInfo.remainingMinutes) {
+                updateState(
+                    state = TunnelState.CONNECTED,
+                    remainingMinutes = remainingMinutes,
+                    message = "Connected ($remainingMinutes min)"
                 )
-                renew()
             }
-        }, 30, 30, TimeUnit.SECONDS)
+
+            // Proactively renew when nearing expiration (<= RENEW_BEFORE_EXPIRY_MINUTES)
+            if (remainingMinutes in 1..RENEW_BEFORE_EXPIRY_MINUTES) {
+                val nowMs = System.currentTimeMillis()
+                if (nowMs - lastAutoRenewTimestampMs > 3 * 60 * 1000L) { // 3-minute cooldown
+                    lastAutoRenewTimestampMs = nowMs
+                    AppLogger.log(
+                        "Pinggy",
+                        "Tunnel is near expiration (~$remainingMinutes min left). Automatically renewing..."
+                    )
+                    renew()
+                }
+            }
+        }, 15, 30, TimeUnit.SECONDS)
     }
 
     /**

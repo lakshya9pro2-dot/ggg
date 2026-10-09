@@ -61,8 +61,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvPublicUrl: TextView
     private lateinit var btnCopyPinggyUrl: Button
     private lateinit var btnRenewPinggy: Button
+    private lateinit var btnSendApi: Button
+    private lateinit var btnToggleLogs: TextView
     private lateinit var tvPinggyLocalServer: TextView
     private lateinit var tvPinggyExpires: TextView
+    private var isLogsActive: Boolean = true
 
     private val hlsUrlStore = HlsUrlStore()
     private lateinit var requestInterceptor: RequestInterceptor
@@ -114,6 +117,8 @@ class MainActivity : AppCompatActivity() {
         tvPublicUrl = findViewById(R.id.tvPublicUrl)
         btnCopyPinggyUrl = findViewById(R.id.btnCopyPinggyUrl)
         btnRenewPinggy = findViewById(R.id.btnRenewPinggy)
+        btnSendApi = findViewById(R.id.btnSendApi)
+        btnToggleLogs = findViewById(R.id.btnToggleLogs)
         tvPinggyLocalServer = findViewById(R.id.tvPinggyLocalServer)
         tvPinggyExpires = findViewById(R.id.tvPinggyExpires)
     }
@@ -121,6 +126,9 @@ class MainActivity : AppCompatActivity() {
     private fun initLogger() {
         tvLogs.text = AppLogger.getHistory()
         AppLogger.setListener { line ->
+            if (!isLogsActive && line != "__CLEAR__") {
+                return@setListener
+            }
             runOnUiThread {
                 if (line == "__CLEAR__") {
                     tvLogs.text = ""
@@ -425,6 +433,39 @@ class MainActivity : AppCompatActivity() {
         btnRenewPinggy.setOnClickListener {
             pinggyManager.renew()
             Toast.makeText(this, "Renewing Pinggy tunnel...", Toast.LENGTH_SHORT).show()
+        }
+
+        btnSendApi.setOnClickListener {
+            val url = pinggyManager.currentUrl
+            if (url.isNullOrBlank()) {
+                Toast.makeText(this, "No active Pinggy URL to send", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            Toast.makeText(this, "Sending URL to API...", Toast.LENGTH_SHORT).show()
+            pinggyManager.sendUrlToWorker { success, errorMsg ->
+                runOnUiThread {
+                    if (success) {
+                        Toast.makeText(this, "POST /api/app — Success (HTTP 200)", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this, "POST /api/app — Error: ${errorMsg ?: "invalid url"}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+
+        btnToggleLogs.setOnClickListener {
+            isLogsActive = !isLogsActive
+            if (isLogsActive) {
+                btnToggleLogs.text = "[ Stop Logs ]"
+                tvLogs.text = AppLogger.getHistory()
+                scrollLogs.post {
+                    scrollLogs.fullScroll(View.FOCUS_DOWN)
+                }
+                Toast.makeText(this, "Logs resumed", Toast.LENGTH_SHORT).show()
+            } else {
+                btnToggleLogs.text = "[ Start Logs ]"
+                Toast.makeText(this, "Logs paused", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
