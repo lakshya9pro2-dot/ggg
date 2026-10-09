@@ -39,6 +39,6 @@ class KineflexRegistrationTest {
 
     @Test
     fun testDefaultRegisterUrl() {
-        assertEquals("https://kineflex.site/api/app", KineflexRegistration.DEFAULT_REGISTER_URL)
+        assertEquals("https://pinggy-registry.kineflex-netflex.workers.dev/api/app", KineflexRegistration.DEFAULT_REGISTER_URL)
     }
 }

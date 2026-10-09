@@ -11,3 +11,7 @@
 
 # AndroidX Core
 -dontwarn androidx.**
+
+# Keep JSch classes for embedded SSH tunnel
+-keep class com.jcraft.jsch.** { *; }
+-dontwarn com.jcraft.jsch.**

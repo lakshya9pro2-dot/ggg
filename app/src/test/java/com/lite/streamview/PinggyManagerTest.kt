@@ -13,10 +13,10 @@ class PinggyManagerTest {
         assertEquals("free.pinggy.io", PinggyManager.PINGGY_HOST)
         assertEquals(443, PinggyManager.PINGGY_PORT)
         assertEquals("qr", PinggyManager.PINGGY_USER)
-        assertEquals(8080, PinggyManager.PINGGY_TARGET_PORT)
-        assertEquals(8080, PinggyManager.LOCAL_FORWARD_PORT)
+        assertEquals(7777, PinggyManager.PINGGY_TARGET_PORT)
+        assertEquals(7777, PinggyManager.LOCAL_FORWARD_PORT)
         assertEquals(10, PinggyManager.RENEW_BEFORE_EXPIRY_MINUTES)
-        assertEquals("https://kineflex.site/api/app", PinggyManager.REGISTER_URL)
+        assertEquals("https://pinggy-registry.kineflex-netflex.workers.dev/api/app", PinggyManager.REGISTER_URL)
     }
 
     @Test

@@ -30,7 +30,7 @@ class KineflexRegistration(
 ) {
 
     companion object {
-        const val DEFAULT_REGISTER_URL = "https://kineflex.site/api/app"
+        const val DEFAULT_REGISTER_URL = "https://pinggy-registry.kineflex-netflex.workers.dev/api/app"
     }
 
     /**

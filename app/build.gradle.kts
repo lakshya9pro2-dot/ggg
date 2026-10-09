@@ -57,6 +57,9 @@ dependencies {
     // NanoHTTPD lightweight embedded HTTP server (~60KB)
     implementation("org.nanohttpd:nanohttpd:2.3.1")
 
+    // Embedded Pure-Java SSH Client for Pinggy reverse tunnel (~450KB)
+    implementation("com.github.mwiede:jsch:0.2.17")
+
     // Unit tests
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20231013")
