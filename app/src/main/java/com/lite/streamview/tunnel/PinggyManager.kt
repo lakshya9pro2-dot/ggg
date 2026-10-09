@@ -236,7 +236,7 @@ class PinggyManager(
             }
             session.setServerAliveInterval(30000)
             session.setServerAliveCountMax(3)
-            session.timeout = 20000
+            session.setTimeout(20000)
 
             session.connect(20000)
             AppLogger.log("Pinggy", "SSH session established, requesting remote port forwarding...")
@@ -296,10 +296,9 @@ class PinggyManager(
 
         try {
             val reader = BufferedReader(InputStreamReader(channel.inputStream, Charsets.UTF_8))
-            var line: String?
 
-            while (isRunning.get() && session.isConnected && channel.isConnected && reader.readLine().also { line = it } != null) {
-                val rawLine = line ?: continue
+            while (isRunning.get() && session.isConnected && channel.isConnected) {
+                val rawLine = reader.readLine() ?: break
                 val currentLine = rawLine.replace(ANSI_PATTERN, "").trim()
                 if (currentLine.isBlank()) continue
 
